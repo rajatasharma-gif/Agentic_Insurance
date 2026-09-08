@@ -1,0 +1,9 @@
+definition_version: 2
+entities:
+  streamlit_app:
+    type: streamlit
+    main_file: Insurance_App.py
+    artifacts:
+      - pyproject.toml
+      - Insurance_App.py
+      - .streamlit/config.toml
