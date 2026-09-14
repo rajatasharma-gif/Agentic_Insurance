@@ -1,0 +1,622 @@
+================================================================================
+              AGENTIC INSURANCE - FUNCTIONS DOCUMENTATION
+================================================================================
+
+This document provides detailed documentation of all functions used in the
+Agentic_Insurance Streamlit application, including their purposes, parameters,
+and return values.
+
+================================================================================
+                         UTILITY FUNCTIONS
+================================================================================
+
+1. format_currency(amount)
+   PURPOSE:
+   Converts numeric currency values into human-readable currency strings with
+   appropriate scaling (Billions, Millions, Thousands, or regular).
+   
+   TAKES:
+   - amount (float/int/None): The numeric value to format as currency
+   
+   RETURNS:
+   - str: Formatted currency string (e.g., "$1.5M", "$500.00", "$0.00")
+   
+   EXAMPLE:
+   >>> format_currency(1500000)
+   '$1.50M'
+   >>> format_currency(None)
+   '$0.00'
+
+---
+
+2. format_number(value)
+   PURPOSE:
+   Formats numbers with thousand separators for better readability in displays.
+   
+   TAKES:
+   - value (int/float/None): The numeric value to format
+   
+   RETURNS:
+   - str: Formatted number string with commas (e.g., "1,000,500")
+   
+   EXAMPLE:
+   >>> format_number(1000500)
+   '1,000,500'
+   >>> format_number(None)
+   '0'
+
+---
+
+3. sanitize_id(value)
+   PURPOSE:
+   Validates that an identifier contains only safe characters (alphanumeric,
+   hyphens, underscores) to prevent SQL injection attacks.
+   
+   TAKES:
+   - value (str): The identifier string to validate
+   
+   RETURNS:
+   - str: The validated identifier string if valid
+   
+   RAISES:
+   - ValueError: If the identifier contains invalid characters
+   
+   EXAMPLE:
+   >>> sanitize_id("CUST-1001")
+   'CUST-1001'
+   >>> sanitize_id("CUST'; DROP TABLE--")  # Raises ValueError
+
+---
+
+4. escape_sql_string(value)
+   PURPOSE:
+   Escapes single quotes in SQL strings to prevent SQL injection attacks by
+   doubling single quotes.
+   
+   TAKES:
+   - value (str): The string value to escape for SQL usage
+   
+   RETURNS:
+   - str: The escaped string with single quotes doubled
+   
+   EXAMPLE:
+   >>> escape_sql_string("John's Policy")
+   "John''s Policy"
+
+---
+
+5. generate_calc_id()
+   PURPOSE:
+   Generates a unique calculation ID for premium calculation records.
+   Format: C-YYMMDDHHMMSSxx (max 17 characters to fit VARCHAR(20)).
+   Uses timestamp and MD5 hash suffix for uniqueness.
+   
+   TAKES:
+   - None
+   
+   RETURNS:
+   - str: Unique calculation ID (e.g., "C-260914150230AB")
+   
+   EXAMPLE:
+   >>> calc_id = generate_calc_id()
+   >>> len(calc_id) <= 20
+   True
+
+---
+
+================================================================================
+                        AGENT COMMUNICATION FUNCTIONS
+================================================================================
+
+6. call_agent(agent_fqn, messages, thread_id=None, parent_message_id=None)
+   PURPOSE:
+   Calls a Snowflake Cortex Data Agent via the SNOWFLAKE.CORTEX.DATA_AGENT_RUN
+   SQL function. Constructs JSON request payload, executes through Snowpark
+   session, and extracts text response and metadata.
+   
+   TAKES:
+   - agent_fqn (str): Fully qualified name of the Cortex Agent
+                      (e.g., "INSURANCE_MGMT_SYSTEM.CORE.CLAIMS_TRIAGE_AGENT")
+   - messages (list): List of message dicts with "role" (user/assistant) and
+                      "content" (text) keys
+   - thread_id (str, optional): Previous conversation thread ID for continuity
+   - parent_message_id (str, optional): Parent message ID for conversation threading
+   
+   RETURNS:
+   - tuple: (response_text, thread_id, message_id)
+     * response_text (str): The agent's text response
+     * thread_id (str/None): Thread ID for maintaining conversation context
+     * message_id (str/None): Message ID for tracking conversation flow
+   
+   AGENT EXAMPLES:
+   - "INSURANCE_MGMT_SYSTEM.CORE.EXECUTIVE_INSIGHTS_AGENT"
+   - "INSURANCE_MGMT_SYSTEM.CORE.CLAIMS_TRIAGE_AGENT"
+   - "INSURANCE_MGMT_SYSTEM.RISK.CHURN_PREDICTION_AGENT"
+   - "INSURANCE_MGMT_SYSTEM.PREMIUM.PREMIUM_CALCULATION_AGENT"
+
+---
+
+7. render_agent_chat(agent_key, agent_fqn, agent_label, sample_questions, 
+                     system_prompt=None)
+   PURPOSE:
+   Builds a reusable Streamlit UI component for chatting with Cortex Agents.
+   Includes pre-configured quick-question chips, conversation history display,
+   message input field, and clear-chat functionality. Manages session state
+   for thread continuity.
+   
+   TAKES:
+   - agent_key (str): Unique key for session state (e.g., "exec", "claims", "risk")
+   - agent_fqn (str): Fully qualified name of the Cortex Agent
+   - agent_label (str): Display name for the agent (e.g., "Claims Triage Agent")
+   - sample_questions (list): List of pre-configured question strings to display
+                              as clickable chips
+   - system_prompt (str, optional): System instruction to prepend to user messages
+   
+   RETURNS:
+   - None (renders Streamlit UI components directly)
+   
+   SESSION STATE KEYS CREATED:
+   - f"agent_messages_{agent_key}": Stores message history
+   - f"agent_thread_{agent_key}": Stores current thread ID
+   - f"agent_parent_msg_{agent_key}": Stores parent message ID
+   
+   EXAMPLE USAGE:
+   render_agent_chat(
+       agent_key="claims",
+       agent_fqn="INSURANCE_MGMT_SYSTEM.CORE.CLAIMS_TRIAGE_AGENT",
+       agent_label="Claims Triage Agent",
+       sample_questions=[
+           "High fraud score claims?",
+           "Staged accident patterns?",
+           "Pending claims over $10K?"
+       ]
+   )
+
+---
+
+================================================================================
+                         REPORTING FUNCTIONS
+================================================================================
+
+8. generate_pdf_report(kpi_data, chart_dataframes, title="Executive Dashboard Report")
+   PURPOSE:
+   Generates a professional PDF report containing KPI summary table, data tables,
+   and chart data. Uses ReportLab library for PDF generation with formatted
+   styling. Returns PDF as bytes for download.
+   
+   TAKES:
+   - kpi_data (dict): Dictionary of KPI metrics with keys (metric names) and
+                      values (metric values)
+   - chart_dataframes (dict): Dictionary of DataFrames to include in report
+                              Key: section name, Value: pandas DataFrame
+   - title (str, optional): Report title (default: "Executive Dashboard Report")
+   
+   RETURNS:
+   - bytes: PDF document as bytes ready for download
+   
+   DEPENDENCIES:
+   - reportlab.lib (colors, pagesizes, styles, units, enums)
+   - reportlab.platypus (document generation components)
+   
+   PDF STRUCTURE:
+   1. Title with generation timestamp
+   2. Key Portfolio Indicators summary table
+   3. Individual data tables for each DataFrame (up to 50 rows each)
+   
+   EXAMPLE:
+   kpi_summary = {
+       "Gross Written Premium": 5000000,
+       "Total Claims Paid": 3000000
+   }
+   chart_dfs = {"Revenue Trend": trend_df, "Loss Ratio": loss_df}
+   pdf_bytes = generate_pdf_report(kpi_summary, chart_dfs)
+
+---
+
+================================================================================
+                    STREAMLIT CONFIGURATION & SETUP
+================================================================================
+
+9. st.set_page_config()
+   PURPOSE:
+   Configures Streamlit page settings for the application.
+   
+   CONFIGURATION USED:
+   - page_title: "AI Insurance Control Center"
+   - page_icon: "🛡️"
+   - layout: "wide" (Uses full screen width)
+
+---
+
+10. get_active_session()
+    PURPOSE:
+    Obtains active Snowflake Snowpark session for executing SQL queries.
+    
+    RETURNS:
+    - Session: Active Snowflake Snowpark session object
+    
+    USED THROUGHOUT for:
+    - session.sql() - Execute SQL queries
+    - session.sql().to_pandas() - Convert results to pandas DataFrames
+
+---
+
+================================================================================
+                      DATA RETRIEVAL FUNCTIONS
+================================================================================
+
+11. fetch_executive_kpis()
+    PURPOSE:
+    Cached function that retrieves executive-level KPIs from analytics tables.
+    Decorated with @st.cache_data(ttl=300) for 5-minute caching.
+    
+    TAKES:
+    - None
+    
+    RETURNS:
+    - tuple: (gwp_data, claims_data, fraud_data)
+      * gwp_data (dict): Policy trends KPIs
+        - TOTAL_GWP: Total Gross Written Premium
+        - AVG_RETENTION_PCT: Average retention rate percentage
+        - AVG_GROWTH_PCT: Average growth percentage
+        - TOTAL_ACTIVE_POLICIES: Count of active policies
+        - TOTAL_NEW_POLICIES: Count of new policies acquired
+        - TOTAL_CANCELLED_POLICIES: Count of cancelled policies
+      
+      * claims_data (dict): Claims performance KPIs
+        - TOTAL_PAYOUTS: Total amount paid in claims
+        - TOTAL_CLAIMS_COUNT: Total number of claims
+        - APPROVAL_RATE_PCT: Approval rate percentage
+        - AVG_SLA_DAYS: Average processing days
+      
+      * fraud_data (dict): Fraud prevention KPIs
+        - TOTAL_FRAUD_SAVED: Total amount saved from fraud prevention
+    
+    QUERIES:
+    - INSURANCE_MGMT_SYSTEM.ANALYTICS.POLICY_TRENDS
+    - INSURANCE_MGMT_SYSTEM.ANALYTICS.CLAIMS_KPI
+    - INSURANCE_MGMT_SYSTEM.ANALYTICS.FRAUD_ALERTS
+
+---
+
+================================================================================
+                    DIALOG/CONFIRMATION FUNCTIONS
+================================================================================
+
+12. confirm_approve(claim_id, user)
+    PURPOSE:
+    Dialog function that confirms user wants to approve a claim before execution.
+    Updates CLAIMS table and records the approval action.
+    
+    TAKES:
+    - claim_id (str): The claim ID to approve
+    - user (str): Current user performing the action
+    
+    RETURNS:
+    - None (Updates database and reruns Streamlit app)
+    
+    SIDE EFFECTS:
+    - Updates INSURANCE_MGMT_SYSTEM.CORE.CLAIMS table
+    - Sets CLAIM_STATUS to 'Approved'
+    - Records UPDATED_BY and UPDATED_AT timestamp
+
+---
+
+13. confirm_deny(claim_id, user)
+    PURPOSE:
+    Dialog function that confirms user wants to deny a claim with optional reason.
+    Updates CLAIMS table and records the denial action.
+    
+    TAKES:
+    - claim_id (str): The claim ID to deny
+    - user (str): Current user performing the action
+    
+    RETURNS:
+    - None (Updates database and reruns Streamlit app)
+    
+    SIDE EFFECTS:
+    - Updates INSURANCE_MGMT_SYSTEM.CORE.CLAIMS table
+    - Sets CLAIM_STATUS to 'Denied'
+    - Records UPDATED_BY and UPDATED_AT timestamp
+    
+    USER INPUT:
+    - deny_reason: Optional text input for denial reason
+
+---
+
+14. confirm_escalate(claim_id, user)
+    PURPOSE:
+    Dialog function that confirms user wants to escalate claim to fraud unit.
+    Flags claim for fraud investigation and updates status.
+    
+    TAKES:
+    - claim_id (str): The claim ID to escalate
+    - user (str): Current user performing the action
+    
+    RETURNS:
+    - None (Updates database and reruns Streamlit app)
+    
+    SIDE EFFECTS:
+    - Updates INSURANCE_MGMT_SYSTEM.CORE.CLAIMS table
+    - Sets ESCALATED to TRUE
+    - Sets CLAIM_STATUS to 'Escalated'
+    - Records UPDATED_BY and UPDATED_AT timestamp
+
+---
+
+================================================================================
+                    STREAMLIT UI FUNCTIONS USED
+================================================================================
+
+These are Streamlit built-in functions used throughout the application:
+
+15. st.title(text)
+    PURPOSE: Displays main page title with large formatting
+
+16. st.subheader(text)
+    PURPOSE: Displays section subheading
+
+17. st.markdown(text)
+    PURPOSE: Renders Markdown-formatted text/HTML
+
+18. st.columns(num)
+    PURPOSE: Creates layout columns for side-by-side UI elements
+    RETURNS: List of column objects for content placement
+
+19. st.sidebar.radio(label, options)
+    PURPOSE: Creates radio button selector in sidebar for navigation
+    RETURNS: Selected option value
+
+20. st.selectbox(label, options, key=None)
+    PURPOSE: Creates dropdown selector
+    RETURNS: Selected option value
+
+21. st.text_input(label, value=None, key=None)
+    PURPOSE: Creates text input field
+    RETURNS: User-entered text string
+
+22. st.number_input(label, min_value, max_value, value, key=None)
+    PURPOSE: Creates numeric input field
+    RETURNS: User-entered numeric value
+
+23. st.button(label, type=None, key=None)
+    PURPOSE: Creates clickable button
+    RETURNS: Boolean (True when clicked)
+
+24. st.metric(label, value, delta=None)
+    PURPOSE: Displays KPI metric with large number and optional delta
+
+25. st.dataframe(df, use_container_width=None)
+    PURPOSE: Displays pandas DataFrame as interactive table
+
+26. st.line_chart(data, x=None, y=None)
+    PURPOSE: Renders line chart from data
+
+27. st.bar_chart(data, x=None, y=None)
+    PURPOSE: Renders bar chart from data
+
+28. st.area_chart(data, x=None, y=None)
+    PURPOSE: Renders area chart from data
+
+29. st.expander(label, expanded=False)
+    PURPOSE: Creates collapsible section
+    RETURNS: Context manager for content inside expander
+
+30. st.tabs(tabs_list)
+    PURPOSE: Creates tabbed interface
+    RETURNS: Context managers for each tab
+
+31. st.session_state
+    PURPOSE: Dictionary-like object for storing user session state
+    USAGE: st.session_state[key] = value
+
+32. st.cache_data(ttl=None)
+    PURPOSE: Decorator to cache function results for performance
+    PARAMETER: ttl=300 means cache expires after 300 seconds
+
+33. st.download_button(label, data, file_name, mime)
+    PURPOSE: Creates download button for files
+
+34. st.spinner(text)
+    PURPOSE: Shows loading spinner while code executes
+
+35. st.error(text), st.success(text), st.warning(text), st.info(text)
+    PURPOSE: Displays colored alert messages
+
+36. st.divider()
+    PURPOSE: Renders horizontal divider line
+
+37. st.dialog(title)
+    PURPOSE: Decorator for creating modal dialog functions
+
+38. st.stop()
+    PURPOSE: Stops execution and refreshes page
+
+39. st.rerun()
+    PURPOSE: Triggers app rerun from beginning
+
+40. st.chat_message(role)
+    PURPOSE: Renders chat message UI for specified role (user/assistant)
+
+41. st.caption(text)
+    PURPOSE: Displays small caption text
+
+---
+
+================================================================================
+                       SNOWFLAKE SQL FUNCTIONS
+================================================================================
+
+These SQL functions are executed through Snowpark session:
+
+42. session.sql(query_string)
+    PURPOSE: Executes SQL query on Snowflake
+    RETURNS: Snowpark DataFrame
+
+43. .to_pandas()
+    PURPOSE: Converts Snowpark DataFrame to pandas DataFrame
+    RETURNS: pandas DataFrame
+
+44. .collect()
+    PURPOSE: Executes query and returns results as list of Row objects
+    RETURNS: List of rows
+
+45. SELECT TRY_PARSE_JSON()
+    PURPOSE: Parses JSON string response from Cortex Agent
+
+46. SNOWFLAKE.CORTEX.DATA_AGENT_RUN()
+    PURPOSE: Executes Cortex Data Agent with request payload
+    PARAMETERS: agent_fqn, request_body (JSON), return_json (boolean)
+    RETURNS: JSON response from agent
+
+---
+
+================================================================================
+                        PANDAS FUNCTIONS USED
+================================================================================
+
+47. pd.DataFrame(data, columns=None)
+    PURPOSE: Creates pandas DataFrame from data dictionary or lists
+
+48. pd.concat(dataframes, ignore_index=True)
+    PURPOSE: Combines multiple DataFrames vertically
+
+49. df.to_pandas()
+    PURPOSE: Converts Snowpark DataFrame to pandas
+
+50. df.to_csv(index=False)
+    PURPOSE: Converts DataFrame to CSV string format
+
+51. df.to_dict('records')
+    PURPOSE: Converts DataFrame to list of dictionaries
+
+52. df.empty
+    PURPOSE: Boolean property checking if DataFrame has no rows
+
+53. df.iloc[index]
+    PURPOSE: Accesses DataFrame row by integer position
+
+54. df.isna(value)
+    PURPOSE: Checks if value is null/NaN
+
+55. df.groupby(column)
+    PURPOSE: Groups DataFrame by column values
+    RETURNS: GroupBy object
+
+56. df.apply(function)
+    PURPOSE: Applies function to each row/column
+
+57. df.head(n)
+    PURPOSE: Returns first n rows of DataFrame
+
+58. df.iterrows()
+    PURPOSE: Iterates over DataFrame rows
+
+---
+
+================================================================================
+                    PYTHON STANDARD LIBRARY FUNCTIONS
+================================================================================
+
+59. datetime.datetime.now()
+    PURPOSE: Gets current date and time
+    RETURNS: datetime object
+
+60. datetime.strftime(format_string)
+    PURPOSE: Formats datetime as string
+    EXAMPLE: "%Y-%m-%d %H:%M" for "2026-09-14 15:30"
+
+61. hashlib.md5(data)
+    PURPOSE: Creates MD5 hash of data
+    USAGE: hashlib.md5(str(value).encode()).hexdigest()
+
+62. json.dumps(obj)
+    PURPOSE: Converts Python object to JSON string
+
+63. json.loads(string)
+    PURPOSE: Converts JSON string to Python object
+
+64. re.match(pattern, string)
+    PURPOSE: Checks if string matches regex pattern
+    RETURNS: Match object if matches, None otherwise
+
+65. io.BytesIO()
+    PURPOSE: Creates in-memory bytes buffer for file content
+
+---
+
+================================================================================
+                    REPORTLAB FUNCTIONS USED
+================================================================================
+
+66. SimpleDocTemplate(buffer, pagesize, margins)
+    PURPOSE: Creates PDF document structure
+
+67. Table(data, colWidths, repeatRows)
+    PURPOSE: Creates table for PDF with specified column widths
+
+68. Table.setStyle(TableStyle)
+    PURPOSE: Applies styling to PDF table
+
+69. TableStyle([styles])
+    PURPOSE: Defines table formatting rules (colors, fonts, alignment)
+
+70. Paragraph(text, style)
+    PURPOSE: Creates formatted text paragraph for PDF
+
+71. Spacer(width, height)
+    PURPOSE: Adds vertical spacing in PDF
+
+72. PageBreak()
+    PURPOSE: Inserts page break in PDF
+
+---
+
+================================================================================
+                         KEY MODULES IMPORTED
+================================================================================
+
+- streamlit (st): UI framework
+- pandas (pd): Data manipulation
+- json: JSON encoding/decoding
+- re: Regular expressions
+- io: Input/output operations
+- hashlib: Cryptographic hashing
+- datetime: Date/time operations
+- snowflake.snowpark.context: Snowflake session management
+- reportlab.*: PDF generation
+
+---
+
+================================================================================
+                         APPLICATION FLOW
+================================================================================
+
+MODULE 1: Executive Analytics (📊)
+  └─ fetch_executive_kpis() → Retrieves KPI data
+     └─ format_currency(), format_number() → Format display values
+     └─ generate_pdf_report() → Create downloadable PDF
+     └─ render_agent_chat() → Executive Insights Agent
+
+MODULE 2: Premium Calculator (🧮)
+  └─ generate_calc_id() → Create unique calculation ID
+  └─ escape_sql_string() → Sanitize input data
+  └─ escape_sql_string() → Store calculation in database
+
+MODULE 3: Claims Processing (⚖️)
+  └─ escape_sql_string() → Sanitize status filters
+  └─ sanitize_id() → Validate claim IDs
+  └─ confirm_approve() → Approve claim dialog
+  └─ confirm_deny() → Deny claim dialog
+  └─ confirm_escalate() → Escalate to fraud dialog
+  └─ render_agent_chat() → Claims Triage Agent
+
+MODULE 4: Churn & Risk (🛡️)
+  └─ format_currency() → Format revenue at risk
+  └─ format_number() → Format policy counts
+  └─ render_agent_chat() → Churn Prediction Agent
+
+---
+
+END OF FUNCTIONS DOCUMENTATION
+================================================================================
