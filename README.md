@@ -1,625 +1,294 @@
 # Agentic Insurance Platform
 
-An intelligent, agent-driven application designed to revolutionize the insurance industry through automation, data analysis, and AI-powered decision-making. This platform leverages multiple specialized agents to streamline insurance operations, policy management, claims processing, and customer engagement.
+An AI-powered insurance management system built with **Snowflake Cortex Agents** for analytics, premium calculation, claims processing, and risk prediction.
 
 ## Table of Contents
 1. [Purpose of This Repository](#purpose-of-this-repository)
 2. [Data Architecture](#data-architecture)
 3. [Application Workflow](#application-workflow)
-4. [Agents Overview](#agents-overview)
+4. [Modules & Agents](#modules--agents)
 
 ---
 
 ## Purpose of This Repository
 
-This repository contains a comprehensive **Agentic Insurance Platform** designed to automate and enhance key insurance industry workflows. The platform serves multiple critical functions:
+This repository contains an **Agentic Insurance Management System** designed to leverage AI agents for insurance operations. The platform integrates:
 
-### Core Objectives
-- **Automate Policy Management**: Streamline policy creation, updates, and lifecycle management
-- **Intelligent Claims Processing**: Automate claim validation, assessment, and settlement with AI-driven decision-making
-- **Customer Interaction**: Provide intelligent customer service through conversational AI agents
-- **Risk Assessment**: Analyze customer data and calculate risk profiles automatically
-- **Data Analytics**: Generate insights from insurance data for business intelligence
-- **Compliance & Reporting**: Ensure regulatory compliance and generate required reports
+- **Snowflake Cortex Data Agents** for intelligent automation
+- **Streamlit UI** for dashboard visualization and agent interactions
+- **Insurance Analytics** for portfolio health and KPI tracking
+- **Premium Calculation** for dynamic pricing
+- **Claims Processing & Triage** using AI agents
+- **Churn & Risk Prediction** engine for customer retention
 
-### Target Users
-- Insurance Agents & Brokers
-- Claims Adjusters
-- Customer Service Representatives
-- Risk Analysts
-- Insurance Company Management
-- End Customers (for policy inquiries and claims)
-
-### Key Benefits
-- **Efficiency**: Reduces manual processing time by automating routine tasks
-- **Accuracy**: Minimizes human error in policy and claims processing
-- **Scalability**: Handles large volumes of customer requests and claims
-- **Personalization**: Provides customized customer experiences through AI agents
-- **Compliance**: Maintains audit trails and regulatory compliance documentation
+### Key Components
+- **Database**: Snowflake with insurance-specific schema
+- **UI Framework**: Streamlit application (`Agentic_Insurance` file)
+- **Data**: SQL scripts for schema creation and sample data population
+- **Agents**: Cortex Data Agents for various insurance workflows
 
 ---
 
 ## Data Architecture
 
-### Database Structure
+### Database Schema
+The system uses **INSURANCE_MGMT_SYSTEM** database with 4 schemas:
 
-The platform utilizes a sophisticated relational database with multiple interconnected tables designed to manage the complete insurance lifecycle:
+#### **1. CORE Schema**
+Fundamental business entities:
 
-#### Core Tables
+**AGENTS Table**
+- Core agent information (Insurance Agents, Underwriters, Claims Analysts, Risk Managers)
+- Fields: AGENT_ID, AGENT_NAME, ROLE, REGION, BRANCH, SPECIALIZATION, PERFORMANCE_SCORE, ACTIVE_POLICIES_COUNT
 
-**1. Customers Table**
-- Stores customer personal and contact information
-- Fields: customer_id, name, email, phone, address, date_of_birth, customer_type
-- Purpose: Central repository for all customer data
-- Relationships: Links to policies, claims, and interactions
+**CUSTOMERS Table**
+- Customer personal and financial information
+- Fields: CUSTOMER_ID, FIRST_NAME, LAST_NAME, DATE_OF_BIRTH, AGE, GENDER, EMAIL, PHONE, ADDRESS, CITY, STATE, ZIP_CODE, OCCUPATION, ANNUAL_INCOME, CREDIT_SCORE, SMOKING_STATUS, BMI
 
-**2. Policies Table**
-- Contains insurance policy information
-- Fields: policy_id, customer_id, policy_type, coverage_amount, premium, start_date, end_date, status, terms_conditions
-- Purpose: Tracks all active and historical policies
-- Relationships: Links to customers, claims, and coverage details
+**POLICIES Table**
+- Insurance policies associated with customers
+- Fields: POLICY_ID, CUSTOMER_ID, AGENT_ID, POLICY_TYPE (Health/Auto/Life/Home), PLAN_TIER (Bronze/Silver/Gold/Platinum), POLICY_STATUS, START_DATE, END_DATE, PREMIUM_AMOUNT, COVERAGE_AMOUNT, DEDUCTIBLE, LOSS_RATIO, AUTO_RENEW, UNDERWRITING_SCORE
 
-**3. Claims Table**
-- Manages insurance claims data
-- Fields: claim_id, policy_id, customer_id, claim_date, claim_type, amount, status, description, assessment_notes
-- Purpose: Tracks claim lifecycle from submission to settlement
-- Relationships: Links to policies, customers, and assessment records
+**CLAIMS Table**
+- Insurance claim records
+- Fields: CLAIM_ID, POLICY_ID, CUSTOMER_ID, CLAIM_DATE, REPORTED_DATE, CLAIM_TYPE, CLAIM_STATUS, CLAIM_AMOUNT, APPROVED_AMOUNT, FRAUD_FLAG, FRAUD_SCORE, FRAUD_REASON, ASSIGNED_ADJUSTER, RESOLUTION_DATE, DAYS_TO_RESOLVE, PRIORITY, ESCALATED
 
-**4. Coverage Options Table**
-- Details various coverage types and limits
-- Fields: coverage_id, policy_id, coverage_type, limit_amount, premium_component, exclusions
-- Purpose: Defines what is covered under each policy
-- Relationships: Associated with policies and used in risk calculations
+#### **2. PREMIUM Schema**
+Premium calculation and rate management:
 
-**5. Agents Assignment Table**
-- Maps specialized agents to customer accounts or claim cases
-- Fields: assignment_id, agent_type, customer_id, claim_id, assignment_date, status
-- Purpose: Tracks which AI agent handles specific customer interactions
-- Relationships: Links to customer and claims management workflows
+**PREMIUM_FACTORS Table**
+- Rating factors for premium calculation
+- Fields: FACTOR_ID, POLICY_TYPE, FACTOR_NAME, FACTOR_CATEGORY, FACTOR_VALUE, MULTIPLIER, BASE_RATE
 
-**6. Interaction Logs Table**
-- Records all customer interactions and communications
-- Fields: interaction_id, customer_id, agent_type, interaction_type, timestamp, content, resolution
-- Purpose: Maintains audit trail of all customer communications
-- Relationships: References customers and assigned agents
+**PLAN_TIERS Table**
+- Pre-defined plan options for each policy type
+- Fields: TIER_ID, POLICY_TYPE, PLAN_NAME, MONTHLY_PREMIUM, ANNUAL_PREMIUM, COVERAGE_LIMIT, DEDUCTIBLE, COPAY_PCT, KEY_BENEFITS, RECOMMENDED_FOR
 
-**7. Risk Assessment Table**
-- Stores risk profiles and assessment scores
-- Fields: assessment_id, customer_id, policy_id, risk_score, assessment_date, factors, recommendations
-- Purpose: Maintains risk analytics for underwriting and pricing decisions
-- Relationships: Links to customers and policies
+**PREMIUM_CALCULATIONS Table**
+- Records of premium calculations for quotes and policies
+- Fields: CALC_ID, CUSTOMER_ID, POLICY_TYPE, PLAN_TIER, CALC_DATE, BASE_PREMIUM, AGE_FACTOR, LOCATION_FACTOR, HEALTH_FACTOR, LIFESTYLE_FACTOR, CLAIMS_HISTORY_FACTOR, FINAL_PREMIUM, DISCOUNT_APPLIED, FACTOR_BREAKDOWN
 
-**8. Document Storage Table**
-- Manages policy documents, claim forms, and supporting documents
-- Fields: document_id, customer_id, claim_id, document_type, file_path, upload_date, verification_status
-- Purpose: Centralized document management
-- Relationships: Associated with customers and claims
+#### **3. RISK Schema**
+Risk management and predictions:
 
-### Semantic Views
+**AT_RISK_POLICIES Table**
+- Policies identified as at-risk for churn
+- Fields: RISK_ID, POLICY_ID, CUSTOMER_ID, POLICY_TYPE, RISK_CATEGORY, RISK_SCORE, REVENUE_AT_RISK, CHURN_PROBABILITY, RISK_DRIVERS, LAST_INTERACTION_DATE, COMPLAINTS_COUNT, MISSED_PAYMENTS, RECOMMENDED_ACTION, PRIORITY
 
-**1. Active Policies View**
-- Aggregates active policies for quick access
-- Shows: customer_id, policy_id, policy_type, coverage_amount, next_premium_due
-- Purpose: Real-time visibility into active policy portfolio
-- Filters: WHERE status = 'ACTIVE'
+**RISK_FACTORS Table**
+- Configurable risk assessment factors
+- Fields: FACTOR_ID, FACTOR_NAME, FACTOR_CATEGORY, WEIGHT, THRESHOLD_LOW/MEDIUM/HIGH, APPLIES_TO
 
-**2. Pending Claims View**
-- Displays claims awaiting processing or assessment
-- Shows: claim_id, policy_id, customer_name, claim_amount, days_pending, priority_level
-- Purpose: Prioritizes claims for agent processing
-- Filters: WHERE status IN ('SUBMITTED', 'UNDER_REVIEW', 'PENDING_ASSESSMENT')
+**CHURN_PREDICTIONS Table**
+- Predictive models for customer churn
+- Fields: PREDICTION_ID, POLICY_ID, CUSTOMER_ID, PREDICTION_DATE, CHURN_PROBABILITY, CONFIDENCE_SCORE, TOP_RISK_FACTOR, PREDICTED_CHURN_DATE, RETENTION_OFFER, OUTCOME
 
-**3. Customer Risk Profile View**
-- Consolidated view of customer risk metrics
-- Shows: customer_id, name, overall_risk_score, policy_count, claim_history, recommendation
-- Purpose: Supports underwriting and policy decisions
-- Joins: customers + risk_assessments + claims
+#### **4. ANALYTICS Schema**
+Business intelligence and reporting:
 
-**4. Claims Settlement Pipeline View**
-- Tracks claims through settlement stages
-- Shows: claim_id, customer_name, current_stage, days_in_stage, estimated_settlement_date
-- Purpose: Manages claims workflow and SLA compliance
-- Stages: Submitted → Reviewed → Assessed → Approved → Settled
+**CLAIMS_KPI Table**
+- Monthly claims performance metrics
+- Fields: KPI_ID, MONTH_YEAR, TOTAL_CLAIMS, CLAIMS_APPROVED, CLAIMS_DENIED, CLAIMS_PENDING, APPROVAL_RATE, AVG_PROCESSING_DAYS, TOTAL_PAYOUT, FRAUD_DETECTED, CUSTOMER_SATISFACTION
 
-**5. Agent Workload View**
-- Distributes work across specialized agents
-- Shows: agent_type, assigned_cases, average_resolution_time, current_capacity
-- Purpose: Optimizes agent allocation and balances workloads
-- Filters: BY agent_type, status = 'ACTIVE'
+**POLICY_TRENDS Table**
+- Monthly policy acquisition and retention metrics
+- Fields: TREND_ID, MONTH_YEAR, POLICY_TYPE, NEW_POLICIES, RENEWED_POLICIES, CANCELLED_POLICIES, ACTIVE_POLICIES, TOTAL_PREMIUM_REVENUE, RETENTION_RATE, GROWTH_RATE
 
-**6. Customer Interaction History View**
-- Timeline of all customer communications
-- Shows: customer_id, interaction_date, agent_type, interaction_type, resolution_status, notes
-- Purpose: Provides 360-degree customer view for agents
-- Orders: BY interaction_date DESC
+**LOSS_RATIO_HISTORY Table**
+- Historical loss ratio and underwriting profitability
+- Fields: RECORD_ID, POLICY_TYPE, PLAN_TIER, MONTH_YEAR, PREMIUMS_EARNED, CLAIMS_PAID, LOSS_RATIO, COMBINED_RATIO, EXPENSE_RATIO
 
-**7. Premium & Revenue View**
-- Financial overview of policies and premiums
-- Shows: policy_id, customer_name, annual_premium, payment_status, revenue_collected
-- Purpose: Supports financial reporting and revenue forecasting
-- Joins: policies + payment_records
-
-**8. Compliance & Audit View**
-- Tracks regulatory compliance and audit trails
-- Shows: activity_id, actor, action, timestamp, customer_id, policy_id, change_details
-- Purpose: Maintains compliance documentation
-- Immutable: Historical record of all changes
+**FRAUD_ALERTS Table**
+- Fraud detection and investigation records
+- Fields: ALERT_ID, CLAIM_ID, POLICY_ID, CUSTOMER_ID, ALERT_DATE, FRAUD_TYPE, CONFIDENCE_SCORE, ALERT_STATUS, INVESTIGATION_NOTES, RESOLUTION, AMOUNT_SAVED
 
 ---
 
 ## Application Workflow
 
-### End-to-End Process Flow
+The system is built as a **Streamlit application** with multiple interconnected modules:
 
-```
-Customer Inquiry/Request
-        ↓
-Router Agent (Classify Request)
-        ↓
-    ┌───┴───┬────────────┬──────────┬─────────┐
-    ↓       ↓            ↓          ↓         ↓
- Policy   Claims     Customer    Risk    Billing
- Agent    Agent      Service    Agent    Agent
-          ↓          Agent       ↓        ↓
-      Assessment  Interaction Resolution Payment
-         ↓        Handling      ↓        Processing
-    Resolution    ↓         Risk Score   ↓
-         ↓      Resolution Calculation Confirmation
-      Settlement  ↓         ↓
-         ↓     Customer    Update DB
-     Closure  Satisfaction  ↓
-         ↓      ↓         Complete
-      DB Update Log        ↓
-         ↓     ↓         End
-         └─────┴─────────→ End
+### **Module 1: Executive Analytics Dashboard**
+**Purpose**: Real-time portfolio intelligence and KPI tracking
 
-```
+**Data Flow**:
+1. Fetches KPIs from ANALYTICS schema tables (POLICY_TRENDS, CLAIMS_KPI, FRAUD_ALERTS)
+2. Calculates key metrics:
+   - Gross Written Premium (GWP)
+   - Total Claims Paid
+   - Net Underwriting Margin
+   - Loss Ratio & Combined Ratio
+   - Retention & Growth Rates
+   - Active Policies Count
+3. Displays visualizations:
+   - Monthly revenue vs. claims trajectory
+   - Revenue distribution by policy type
+   - Loss ratio trends
+   - Policy growth (new vs. cancelled)
+   - Customer demographics by age bracket
+4. Exports data as CSV or PDF reports
 
-### Detailed Workflow Steps
-
-#### **Phase 1: Request Entry & Routing**
-
-1. **Customer Initiates Request**
-   - Customer contacts platform via web portal, mobile app, phone, or email
-   - Request includes: customer identification, request type, description
-   - System captures: timestamp, channel, customer_id
-
-2. **Router Agent Analysis**
-   - Reads and understands customer request
-   - Classifies request type: NEW_POLICY, POLICY_UPDATE, CLAIMS, INQUIRY, BILLING
-   - Determines priority level based on urgency and claim amount
-   - Assigns to appropriate specialized agent
-   - Creates task ticket with context
-
-#### **Phase 2: Specialized Agent Processing**
-
-**3a. Policy Agent Workflow** (if NEW_POLICY or POLICY_UPDATE)
-   - Extracts customer information and insurance needs
-   - Cross-references customer history and risk profile
-   - Reviews coverage options based on customer profile
-   - Calculates premium using underwriting rules
-   - Generates policy documentation
-   - Manages policy modifications and renewals
-   - Updates policy database
-   - Sends policy documents to customer
-
-**3b. Claims Agent Workflow** (if CLAIMS)
-   - Registers claim in system
-   - Validates claim against policy coverage
-   - Extracts relevant policy and customer information
-   - Performs initial assessment of claim validity
-   - Identifies required documentation
-   - Requests additional information from customer if needed
-   - Creates assessment report
-   - Estimates claim settlement amount
-   - Flags suspicious patterns or fraud indicators
-
-**3c. Customer Service Agent Workflow** (if INQUIRY)
-   - Engages customer in conversation
-   - Provides information about policies, coverage, benefits
-   - Answers FAQs about claims, billing, policy terms
-   - Guides customers through self-service options
-   - Escalates complex issues to specialized agents
-   - Maintains customer satisfaction metrics
-   - Documents interaction for quality assurance
-
-**3d. Risk Assessment Agent Workflow** (if RISK_ASSESSMENT needed)
-   - Analyzes customer data (age, location, health, claims history)
-   - Reviews previous claims patterns
-   - Evaluates external risk factors
-   - Calculates risk score using predictive models
-   - Identifies risk categories
-   - Generates recommendations for premium adjustments
-   - Updates risk profile in database
-
-**3e. Billing Agent Workflow** (if BILLING)
-   - Processes premium payments
-   - Manages payment plans
-   - Issues payment reminders and notifications
-   - Handles payment disputes
-   - Generates invoices and payment receipts
-   - Updates customer account status
-   - Manages policy suspension for non-payment
-
-#### **Phase 3: Decision & Resolution**
-
-**4. Approval & Assessment**
-   - System applies business rules and policies
-   - Claims undergo approval workflow
-   - Risk assessments validated
-   - Compliance checks performed
-   - Customer verification confirmed
-
-**5. Database Update**
-   - All agent decisions and actions recorded
-   - Claims status updated
-   - Policies modified as needed
-   - Customer records updated
-   - Audit trail created for compliance
-
-#### **Phase 4: Customer Communication & Closure**
-
-**6. Notification & Communication**
-   - Agent sends result to customer
-   - Provides explanation of decision
-   - Shares relevant documents
-   - Includes next steps or action items
-   - Offers additional assistance
-
-**7. Resolution Confirmation**
-   - Customer confirms receipt and understanding
-   - Satisfaction survey sent
-   - Feedback collected for improvement
-   - Case marked as complete
-
-**8. Closure & Analytics**
-   - All records finalized
-   - Metrics calculated (resolution time, cost, satisfaction)
-   - Performance data fed to analytics
-   - Historical data archived
-   - Request lifecycle complete
+**Agents Used**: None (direct SQL queries to analytics tables)
 
 ---
 
-## Agents Overview
+### **Module 2: Dynamic Premium Calculator**
+**Purpose**: Calculate personalized insurance premiums
 
-### 1. Router Agent
-**Purpose**: Entry point for all customer requests
+**Data Flow**:
+1. User inputs customer profile (age, location, health, claims history)
+2. Cortex Agent queries PREMIUM_FACTORS and PLAN_TIERS
+3. Agent calculates premium using:
+   - Base rate for policy type
+   - Multipliers for risk factors (age, location, health, lifestyle, claims history)
+   - Discount adjustments
+4. Returns quote with breakdown of factors
+5. Option to create policy (inserts into POLICIES table)
+6. Stores calculation record in PREMIUM_CALCULATIONS table
 
-**Responsibilities**:
-- Classify incoming customer requests
-- Understand request intent and context
-- Determine appropriate agent for handling
-- Assign priority level (URGENT, HIGH, NORMAL, LOW)
-- Extract key information for routing
-
-**Decision Logic**:
-- NEW_POLICY → Policy Agent
-- POLICY_UPDATE → Policy Agent
-- CLAIMS → Claims Agent
-- BILLING → Billing Agent
-- GENERAL_INQUIRY → Customer Service Agent
-- RISK_ASSESSMENT → Risk Agent
-
-**Inputs**: Raw customer request, customer_id (if available)
-**Outputs**: Classified request, assigned_agent, priority, context_summary
+**Agents Used**: Premium calculation agent (Cortex Data Agent)
 
 ---
 
-### 2. Policy Agent
-**Purpose**: Manage insurance policies (creation, updates, renewals)
+### **Module 3: Claims Processing & AI Triage**
+**Purpose**: Process and assess insurance claims with fraud detection
 
-**Responsibilities**:
-- Create new insurance policies
-- Modify existing policy terms
-- Handle policy renewals
-- Calculate premiums based on risk
-- Generate policy documents
-- Manage policy cancellations
-- Process endorsements
+**Data Flow**:
+1. User submits claim (policy ID, claim type, amount, description)
+2. System validates policy is active in POLICIES table
+3. Cortex Agent analyzes claim against policy coverage
+4. Agent checks for fraud indicators:
+   - Fraud score calculation
+   - Pattern matching against FRAUD_ALERTS
+   - Duplicate claim detection
+   - Suspicious behavior flags
+5. Agent assesses claim status (Approved/Denied/Escalated/Pending)
+6. Assigns to claims adjuster
+7. Records in CLAIMS table with fraud_flag and fraud_score
+8. If fraud detected, creates FRAUD_ALERTS record
+9. Sends notification with assessment
 
-**Key Features**:
-- Access to: Policy templates, coverage database, premium calculators
-- Validates: Customer eligibility, coverage combinations, regulatory requirements
-- Generates: Policy quotes, policy documents, confirmation letters
-- Updates: Policy database, customer records
-
-**Capabilities**:
-- Risk-based premium calculation
-- Coverage recommendation based on customer profile
-- Compliance validation
-- Policy documentation generation
-- Customer communication
-
-**Example Workflow**:
-1. Receives request for new auto insurance
-2. Extracts customer age, driving history, vehicle info
-3. Queries risk assessment database
-4. Calculates premium using underwriting model
-5. Presents coverage options
-6. Generates policy document upon acceptance
-7. Activates policy and sends confirmation
+**Agents Used**: Claims Processing Agent (Cortex Data Agent)
 
 ---
 
-### 3. Claims Agent
-**Purpose**: Process insurance claims from submission to settlement
+### **Module 4: Churn & Risk Prediction Engine**
+**Purpose**: Identify at-risk policies and predict customer churn
 
-**Responsibilities**:
-- Register and validate claims
-- Assess claim eligibility against policy
-- Request required documentation
-- Investigate claim details
-- Determine claim settlement amount
-- Detect fraud and suspicious patterns
-- Generate assessment reports
-- Recommend approval or denial
+**Data Flow**:
+1. System evaluates all active policies periodically
+2. Cortex Agent calculates risk score using:
+   - Customer tenure and interaction history
+   - Payment behavior (missed payments count)
+   - Complaint history
+   - Policy-specific metrics
+   - Claims history frequency
+3. Predictions stored in CHURN_PREDICTIONS table
+4. Policies with high churn probability marked in AT_RISK_POLICIES
+5. Generates recommended actions:
+   - Retention offers
+   - Contact recommendations
+   - Premium adjustments
+6. Tracks prediction outcomes
 
-**Key Features**:
-- Automatic claim validation against policy coverage
-- Documentation requirements identification
-- Fraud detection algorithms
-- Settlement calculation engine
-- Escalation routing for complex claims
-
-**Capabilities**:
-- Claims intake and registration
-- Policy coverage verification
-- Documentation collection and analysis
-- Fraud investigation support
-- Settlement estimation
-- Appeals handling
-- Claims history analysis
-
-**Example Workflow**:
-1. Receives auto insurance claim submission
-2. Validates policy is active and covers claim type
-3. Extracts claim details (date, amount, type)
-4. Generates required documentation checklist
-5. Requests photos, repair estimates, police reports
-6. Analyzes submitted documents
-7. Calculates settlement amount based on policy limits
-8. Checks for fraud patterns (similar claims, staged accidents)
-9. Generates assessment report
-10. Recommends approval amount
-11. Updates claim status in database
+**Agents Used**: Risk Prediction Agent (Cortex Data Agent)
 
 ---
 
-### 4. Customer Service Agent
-**Purpose**: Provide customer support and information
+## Modules & Agents
 
-**Responsibilities**:
-- Answer policy questions
-- Explain coverage and benefits
-- Guide customers through processes
-- Handle billing inquiries
-- Provide general information
-- Escalate complex issues
-- Maintain customer satisfaction
-- Resolve complaints
+### Architecture Overview
 
-**Key Features**:
-- Natural language understanding
-- FAQ knowledge base
-- Policy information database
-- Escalation workflow
-- Satisfaction tracking
-- Multi-language support
+**Streamlit Application** (`Agentic_Insurance` file)
+- 4 main modules accessible via sidebar navigation
+- Integrates with Snowflake Cortex Agents
+- Real-time data visualization
+- Agent chat interfaces for user interaction
 
-**Capabilities**:
-- Conversational customer support
-- Policy explanation
-- Coverage clarification
-- Process guidance
-- Issue escalation
-- Satisfaction measurement
-- Complaint resolution
+### Cortex Data Agents
 
-**Example Workflow**:
-1. Receives customer inquiry: "What does my policy cover?"
-2. Retrieves customer policy details
-3. Explains coverage in simple language
-4. Answers follow-up questions
-5. Offers additional assistance
-6. Sends written confirmation
-7. Records interaction quality metrics
-8. Follows up if customer had issues
+The system uses **Snowflake Cortex Data Agents** for:
 
----
+1. **Premium Calculation Agent**
+   - Queries customer data and risk factors
+   - Calculates premiums with factor breakdown
+   - Returns personalized quotes
 
-### 5. Risk Assessment Agent
-**Purpose**: Analyze and score customer risk profiles
+2. **Claims Processing Agent**
+   - Validates claims against policy coverage
+   - Performs fraud detection
+   - Recommends approval/denial/escalation
 
-**Responsibilities**:
-- Evaluate customer risk factors
-- Calculate risk scores
-- Identify high-risk customers
-- Recommend premium adjustments
-- Predict claim likelihood
-- Monitor ongoing risk
-- Update risk profiles
-- Generate risk reports
+3. **Risk Prediction Agent**
+   - Evaluates churn probability
+   - Identifies risk drivers
+   - Generates retention strategies
 
-**Key Features**:
-- Predictive risk modeling
-- Historical claims analysis
-- External data integration
-- Risk categorization
-- Trend analysis
-- Recommendations engine
+4. **Analytics Agent** (in Executive Dashboard)
+   - Responds to natural language questions about portfolio health
+   - Analyzes trends and performance
 
-**Capabilities**:
-- Risk score calculation (0-100)
-- Risk factor identification
-- Claims predictability modeling
-- Premium recommendation
-- Risk category assignment (LOW, MEDIUM, HIGH, VERY_HIGH)
-- Trend tracking
+### Agent Integration
 
-**Risk Factors Analyzed**:
-- Age and health status
-- Claims history (frequency, severity)
-- Geographic location
-- Occupation and lifestyle
-- Previous fraud flags
-- Payment history
-- Policy type and coverage amount
-
-**Example Workflow**:
-1. Receives request to assess customer risk
-2. Retrieves customer profile and history
-3. Queries all previous claims
-4. Analyzes claim patterns
-5. Evaluates external risk factors
-6. Runs predictive model
-7. Calculates risk score
-8. Categorizes risk level
-9. Compares to similar customer profiles
-10. Generates premium recommendations
-11. Updates risk profile database
-12. Alerts if significant risk increase
-
----
-
-### 6. Billing Agent
-**Purpose**: Manage payments and billing
-
-**Responsibilities**:
-- Process premium payments
-- Manage payment plans
-- Issue payment reminders
-- Handle payment disputes
-- Generate invoices and receipts
-- Manage policy suspension
-- Provide payment options
-- Track payment status
-
-**Key Features**:
-- Multiple payment method support
-- Automatic payment setup
-- Payment plan management
-- Reminder automation
-- Dispute resolution
-- Receipt generation
-
-**Capabilities**:
-- Payment processing
-- Installment plan creation
-- Payment tracking
-- Reminder scheduling
-- Payment history management
-- Tax documentation
-- Late payment handling
-
-**Example Workflow**:
-1. Receives payment or payment inquiry
-2. Verifies customer and policy
-3. Processes payment via selected method
-4. Updates payment record
-5. Generates receipt
-6. Checks if all premiums paid
-7. Updates policy status to ACTIVE (if previously suspended)
-8. Sends confirmation email
-9. Schedules next payment reminder
-10. Archives transaction for audit trail
-
----
-
-## Agent Interaction Example
-
-**Scenario**: Customer calls about a car accident claim
-
-```
-Customer: "Hello, I was in a car accident this morning. I need to file a claim."
-
-Router Agent: 
-→ Classifies: CLAIMS request
-→ Priority: HIGH
-→ Assigns to: Claims Agent
-→ Creates ticket with: customer_id, date, brief description
-
-Claims Agent:
-→ Greets customer and acknowledges accident
-→ Retrieves auto insurance policy details
-→ Verifies coverage for collision
-→ Registers claim in system: claim_id, date, type
-→ Asks for: accident details, location, other parties involved
-→ Extracts: damage description, estimated cost
-→ Requests: police report, photos, repair estimates
-→ Checks fraud patterns: No flags detected
-→ Validates coverage: APPROVED for collision claim
-→ Calculates settlement: Policy limit $50,000, estimated repair $8,500
-→ Assigns case status: PENDING_DOCUMENTATION
-→ Sends: Confirmation email with claim number and next steps
-
-Risk Assessment Agent (background):
-→ Reviews: Customer's claims history
-→ Analysis: This is first claim in 5 years
-→ Score: No significant change needed
-→ Updates: Risk profile remains MEDIUM
-
-Claims Agent (follow-up):
-→ Receives: Police report, photos, repair estimate
-→ Verifies: All documentation complete
-→ Approves: $8,500 settlement
-→ Updates claim status: APPROVED
-→ Initiates: Payment to repair shop
-→ Notifies: Customer of approval and payment details
-→ Case closed: Settlement complete
-
-Customer Service Agent (quality):
-→ Sends: Follow-up survey
-→ Records: Customer satisfaction metrics
-→ Archives: Interaction for historical record
-```
+Agents communicate via:
+- `call_agent()` function in Streamlit app
+- JSON request/response format
+- Snowflake `SNOWFLAKE.CORTEX.DATA_AGENT_RUN()` procedure
+- Thread-based conversation management
 
 ---
 
 ## Technology Stack
 
-- **Backend**: Python with AI/ML frameworks
-- **Database**: Relational database (SQL)
-- **AI Agents**: Large Language Models (LLM) with specialized prompts
-- **API Layer**: RESTful APIs for integration
-- **Frontend**: Web portal and mobile application
-- **Integration**: Multi-channel support (web, phone, email, chat)
+- **Cloud Platform**: Snowflake
+- **AI Engine**: Snowflake Cortex Agents (LLM-powered)
+- **Frontend**: Streamlit (Python)
+- **Database**: Snowflake SQL
+- **Visualization**: Streamlit charts & tables
+- **Reporting**: PDF & CSV export (ReportLab)
 
 ---
 
-## Getting Started
+## Project Files
+
+### Core Application
+- `Agentic_Insurance` - Main Streamlit application with all 4 modules
+
+### Database & Data
+- `Data/INSURANCE_MGMT_SYSTEM_DDL.sql` - Database schema definition (CORE, PREMIUM, RISK, ANALYTICS schemas)
+- `Data/INSURANCE_MGMT_SYSTEM_DML_PART1.sql` - Sample data for AGENTS, CUSTOMERS, POLICIES, CLAIMS
+- `Data/INSURANCE_MGMT_SYSTEM_DML_PART2.sql` - Sample data for PREMIUM schema tables
+- `Data/INSURANCE_MGMT_SYSTEM_DML_PART3.sql` - Sample data for RISK & ANALYTICS schema tables
+
+### Documentation & Artifacts
+- `Artifacts/Insurance_Platform_Overview.pptx` - Visual presentation of platform architecture
+- `Artifacts/Insurance_Platform_Content.docx` - Detailed platform documentation
+- `Artifacts/Insurance_App_flow_simple.png` - Simplified application flow diagram
+- `Artifacts/Insurance_App_flow_claude.png` - Detailed application architecture diagram
+
+---
+
+## Setup & Deployment
 
 ### Prerequisites
+- Snowflake account with Cortex access
 - Python 3.8+
-- Database access
-- API keys for LLM services
-- Required Python packages (see requirements.txt)
+- Required Python packages: streamlit, pandas, snowflake-snowpark
 
 ### Installation
-1. Clone the repository
-2. Install dependencies: `pip install -r requirements.txt`
-3. Configure database connection
-4. Set up environment variables for API keys
-5. Run initialization scripts
+1. Clone repository
+2. Install dependencies
+3. Set Snowflake connection parameters
+4. Run SQL DDL and DML scripts to initialize database
+5. Launch Streamlit app: `streamlit run Agentic_Insurance`
 
-### Running the Platform
-```bash
-python main.py --mode=production
-```
-
----
-
-## Documentation
-
-Refer to the [Insurance_Platform_Overview.pptx](./Artifacts/Insurance_Platform_Overview.pptx) for detailed presentation and visual diagrams of the platform architecture.
+### Configuration
+- Set Snowflake role and warehouse in sidebar
+- Configure Cortex Agent FQNs for each module
+- Customize premium factors and risk thresholds as needed
 
 ---
 
-## Support & Contributions
-
-For questions, issues, or contributions, please contact the development team or submit an issue in the repository.
-
----
-
-**Last Updated**: September 14, 2026
-**Version**: 1.0
+**Last Updated**: September 14, 2026  
+**Version**: 1.0  
+**Status**: Active Development
