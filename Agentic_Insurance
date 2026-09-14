@@ -1,0 +1,1091 @@
+
+import streamlit as st
+import pandas as pd
+import json
+import re
+import io
+import hashlib
+from datetime import datetime
+from snowflake.snowpark.context import get_active_session
+
+# --- PAGE CONFIGURATION ---
+st.set_page_config(
+    page_title="AI Insurance Control Center",
+    page_icon="🛡️",
+    layout="wide"
+)
+
+session = get_active_session()
+
+# ==============================================================================
+# SHARED UTILITIES
+# ==============================================================================
+
+def format_currency(amount):
+    if amount is None or pd.isna(amount):
+        return "$0.00"
+    val = float(amount)
+    if abs(val) >= 1e9:
+        return f"${val / 1e9:,.2f}B"
+    elif abs(val) >= 1e6:
+        return f"${val / 1e6:,.2f}M"
+    elif abs(val) >= 1e3:
+        return f"${val / 1e3:,.2f}K"
+    else:
+        return f"${val:,.2f}"
+
+def format_number(value):
+    if value is None or pd.isna(value):
+        return "0"
+    return f"{int(value):,}"
+
+# To check the customer id format
+def sanitize_id(value):
+    """Validate that a value looks like a safe identifier (alphanumeric + hyphens/underscores)."""
+    if not re.match(r'^[A-Za-z0-9_\-]+$', str(value)):
+        raise ValueError(f"Invalid identifier: {value}")
+    return str(value)
+
+#  To remove single quote in order to avoid error while execution
+def escape_sql_string(value):
+    """Escape single quotes for SQL string literals."""
+    return str(value).replace("'", "''")
+
+def generate_calc_id():
+    """Generate a short unique CALC_ID that fits VARCHAR(20). Format: C-YYMMDDHHMMSSxx (max 17 chars)."""
+    ts = datetime.now().strftime("%y%m%d%H%M%S")
+    suffix = hashlib.md5(str(datetime.now().timestamp()).encode()).hexdigest()[:2].upper()
+    return f"C-{ts}{suffix}"
+
+
+# Constructs a JSON request payload, calls SNOWFLAKE.CORTEX.DATA_AGENT_RUN through Snowpark session SQL, and extracts the text response and metadata thread_id.
+def call_agent(agent_fqn, messages, thread_id=None, parent_message_id=None):
+    """Call a Cortex Agent via DATA_AGENT_RUN and return (text, thread_id, message_id)."""
+    msg_list = []
+    for m in messages:
+        msg_list.append({
+            "role": m["role"],
+            "content": [{"type": "text", "text": m["content"]}]
+        })
+
+    request_body = {"messages": msg_list, "stream": False}
+    if thread_id is not None:
+        request_body["thread_id"] = thread_id
+        if parent_message_id is not None:
+            request_body["parent_message_id"] = parent_message_id
+
+    sql = f"""
+        SELECT TRY_PARSE_JSON(
+            SNOWFLAKE.CORTEX.DATA_AGENT_RUN(
+                '{agent_fqn}',
+                $${json.dumps(request_body)}$$,
+                TRUE
+            )
+        ) AS RESP
+    """
+    result = session.sql(sql).to_pandas()
+    resp = result["RESP"].iloc[0]
+
+    if isinstance(resp, str):
+        resp = json.loads(resp)
+
+    text_parts = []
+    if resp and "content" in resp:
+        for block in resp["content"]:
+            if block.get("type") == "text":
+                text_parts.append(block["text"])
+
+    metadata = resp.get("metadata", {}) if resp else {}
+    thread = metadata.get("thread_id")
+    message_id = metadata.get("message_id")
+    return "\n".join(text_parts) if text_parts else "No response from agent.", thread, message_id
+
+# Builds a reusable Streamlit UI component for chatting with any Cortex Agent, complete with pre-configured quick-question chips, message history, and clear-chat capabilities.
+def render_agent_chat(agent_key, agent_fqn, agent_label, sample_questions, system_prompt=None):
+    """Render a chat panel for a Cortex Agent with session state."""
+    state_key = f"agent_messages_{agent_key}"
+    thread_key = f"agent_thread_{agent_key}"
+    parent_msg_key = f"agent_parent_msg_{agent_key}"
+
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+    if thread_key not in st.session_state:
+        st.session_state[thread_key] = None
+    if parent_msg_key not in st.session_state:
+        st.session_state[parent_msg_key] = None
+
+    with st.expander(f"🤖 Ask {agent_label}", expanded=False):
+        st.caption(f"Chat with the **{agent_label}** to get AI-powered insights.")
+
+        def _build_messages():
+            msgs = list(st.session_state[state_key])
+            if system_prompt and msgs:
+                msgs[0] = {
+                    "role": msgs[0]["role"],
+                    "content": system_prompt + "\n\n" + msgs[0]["content"]
+                }
+            return msgs
+
+        # Sample question chips
+        sq_cols = st.columns(len(sample_questions))
+        for i, q in enumerate(sample_questions):
+            if sq_cols[i].button(q, key=f"{agent_key}_sq_{i}", use_container_width=True):
+                st.session_state[state_key].append({"role": "user", "content": q})
+                with st.spinner("Agent is thinking..."):
+                    answer, tid, mid = call_agent(
+                        agent_fqn,
+                        _build_messages(),
+                        st.session_state[thread_key],
+                        st.session_state[parent_msg_key]
+                    )
+                st.session_state[state_key].append({"role": "assistant", "content": answer})
+                if tid:
+                    st.session_state[thread_key] = tid
+                if mid:
+                    st.session_state[parent_msg_key] = mid
+                st.rerun()
+
+        # Display conversation history
+        for msg in st.session_state[state_key]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Chat input
+        user_input = st.text_input(
+            "Ask a question...",
+            key=f"{agent_key}_input",
+            placeholder=f"e.g. {sample_questions[0] if sample_questions else 'Ask anything...'}"
+        )
+        if st.button("Send", key=f"{agent_key}_send") and user_input:
+            st.session_state[state_key].append({"role": "user", "content": user_input})
+            with st.spinner("Agent is thinking..."):
+                answer, tid, mid = call_agent(
+                    agent_fqn,
+                    _build_messages(),
+                    st.session_state[thread_key],
+                    st.session_state[parent_msg_key]
+                )
+            st.session_state[state_key].append({"role": "assistant", "content": answer})
+            if tid:
+                st.session_state[thread_key] = tid
+            if mid:
+                st.session_state[parent_msg_key] = mid
+            st.rerun()
+
+        if st.session_state[state_key]:
+            if st.button("Clear conversation", key=f"{agent_key}_clear"):
+                st.session_state[state_key] = []
+                st.session_state[thread_key] = None
+                st.session_state[parent_msg_key] = None
+                st.rerun()
+
+
+def generate_pdf_report(kpi_data, chart_dataframes, title="Executive Dashboard Report"):
+    """Generate a PDF report with all KPIs, tables, and chart data."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=landscape(letter), topMargin=0.5*inch, bottomMargin=0.5*inch)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('CustomTitle', parent=styles['Title'], fontSize=20, spaceAfter=20, alignment=TA_CENTER)
+    section_style = ParagraphStyle('Section', parent=styles['Heading2'], fontSize=14, spaceAfter=10, spaceBefore=15, textColor=colors.HexColor('#1a5276'))
+    caption_style = ParagraphStyle('Caption', parent=styles['Normal'], fontSize=8, textColor=colors.grey, alignment=TA_CENTER)
+
+    elements = []
+    elements.append(Paragraph(title, title_style))
+    elements.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", caption_style))
+    elements.append(Spacer(1, 20))
+
+    # KPI Summary Table
+    if kpi_data:
+        elements.append(Paragraph("Key Portfolio Indicators", section_style))
+        kpi_table_data = [["Metric", "Value"]]
+        for k, v in kpi_data.items():
+            kpi_table_data.append([str(k), str(v)])
+        t = Table(kpi_table_data, colWidths=[3.5*inch, 3*inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a5276')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+            ('FONTSIZE', (0, 0), (-1, 0), 10),
+            ('FONTSIZE', (0, 1), (-1, -1), 9),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#eaf2f8')]),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 15))
+
+    # Data tables
+    for df_name, df in chart_dataframes.items():
+        if df is not None and not df.empty:
+            elements.append(Paragraph(df_name, section_style))
+            headers = list(df.columns)
+            table_data = [headers]
+            for _, row in df.head(50).iterrows():
+                table_data.append([str(v)[:40] for v in row.values])
+            col_count = len(headers)
+            available_width = 9.5 * inch
+            col_w = available_width / col_count
+            t = Table(table_data, colWidths=[col_w]*col_count, repeatRows=1)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c3e50')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('FONTSIZE', (0, 0), (-1, 0), 8),
+                ('FONTSIZE', (0, 1), (-1, -1), 7),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.lightgrey),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f8f9fa')]),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ]))
+            elements.append(t)
+            elements.append(Spacer(1, 10))
+
+    doc.build(elements)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# --- SIDEBAR NAVIGATION ---
+st.sidebar.title("🛡️ Insurance Ops & AI Center")
+st.sidebar.markdown("---")
+page = st.sidebar.radio("Select Module:", [
+    "📊 Executive Analytics",
+    "🧮 Dynamic Premium Calculator",
+    "⚖️ Claims Processing & AI Triage",
+    "🛡️ Churn & Risk Prediction Engine"
+])
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Role: {session.sql('SELECT CURRENT_ROLE()').collect()[0][0]}")
+st.sidebar.caption(f"Warehouse: {session.sql('SELECT CURRENT_WAREHOUSE()').collect()[0][0]}")
+
+
+# ==============================================================================
+# MODULE 1: EXECUTIVE ANALYTICS
+# ==============================================================================
+if page == "📊 Executive Analytics":
+    st.title("📊 Executive Analytics & Portfolio Health")
+    st.markdown("Real-time portfolio intelligence, underwriting loss ratios, revenue metrics, and customer demographic insights across all insurance lines.")
+
+    # --- KPI FETCH (cache-safe: session not captured in return) ---
+    @st.cache_data(ttl=300)
+    def fetch_executive_kpis():
+        kpi_query = """
+            SELECT
+                COALESCE(SUM(TOTAL_PREMIUM_REVENUE), 0) AS TOTAL_GWP,
+                COALESCE(AVG(RETENTION_RATE), 0) * 100 AS AVG_RETENTION_PCT,
+                COALESCE(AVG(GROWTH_RATE), 0) * 100 AS AVG_GROWTH_PCT,
+                COALESCE(SUM(ACTIVE_POLICIES), 0) AS TOTAL_ACTIVE_POLICIES,
+                COALESCE(SUM(NEW_POLICIES), 0) AS TOTAL_NEW_POLICIES,
+                COALESCE(SUM(CANCELLED_POLICIES), 0) AS TOTAL_CANCELLED_POLICIES
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.POLICY_TRENDS
+        """
+        claims_kpi_query = """
+            SELECT
+                COALESCE(SUM(TOTAL_PAYOUT), 0) AS TOTAL_PAYOUTS,
+                COALESCE(SUM(TOTAL_CLAIMS), 0) AS TOTAL_CLAIMS_COUNT,
+                COALESCE(AVG(APPROVAL_RATE), 0) * 100 AS APPROVAL_RATE_PCT,
+                COALESCE(AVG(AVG_PROCESSING_DAYS), 0) AS AVG_SLA_DAYS
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.CLAIMS_KPI
+        """
+        fraud_kpi_query = """
+            SELECT COALESCE(SUM(AMOUNT_SAVED), 0) AS TOTAL_FRAUD_SAVED
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.FRAUD_ALERTS
+        """
+        _session = get_active_session()
+        gwp_df = _session.sql(kpi_query).to_pandas()
+        claims_df = _session.sql(claims_kpi_query).to_pandas()
+        fraud_df = _session.sql(fraud_kpi_query).to_pandas()
+        return (
+            gwp_df.to_dict('records')[0] if not gwp_df.empty else {},
+            claims_df.to_dict('records')[0] if not claims_df.empty else {},
+            fraud_df.to_dict('records')[0] if not fraud_df.empty else {}
+        )
+
+    gwp_data, claims_data, fraud_data = fetch_executive_kpis()
+
+    if not gwp_data or not claims_data:
+        st.warning("No data available in analytics tables. Please ensure POLICY_TRENDS and CLAIMS_KPI are populated.")
+        st.stop()
+
+    total_gwp = gwp_data.get('TOTAL_GWP', 0)
+    total_payouts = claims_data.get('TOTAL_PAYOUTS', 0)
+    total_claims_count = claims_data.get('TOTAL_CLAIMS_COUNT', 0)
+    avg_sla_days = claims_data.get('AVG_SLA_DAYS', 0)
+    avg_retention = gwp_data.get('AVG_RETENTION_PCT', 0)
+    avg_growth = gwp_data.get('AVG_GROWTH_PCT', 0)
+    fraud_saved = fraud_data.get('TOTAL_FRAUD_SAVED', 0)
+    total_active_policies = gwp_data.get('TOTAL_ACTIVE_POLICIES', 0)
+    total_new_policies = gwp_data.get('TOTAL_NEW_POLICIES', 0)
+    total_cancelled_policies = gwp_data.get('TOTAL_CANCELLED_POLICIES', 0)
+    net_underwriting_profit = total_gwp - total_payouts
+    loss_ratio = (total_payouts / total_gwp * 100) if total_gwp > 0 else 0.0
+    combined_ratio = loss_ratio + 30.0
+    avg_claim_size = total_payouts / total_claims_count if total_claims_count > 0 else 0
+
+    # --- KPI SCORECARD as styled table ---
+    st.subheader("Key Portfolio Indicators")
+    st.caption("Data refreshes every 5 minutes")
+
+    kpi_display = {
+        "Gross Written Premium": format_currency(total_gwp),
+        "Total Claims Paid": format_currency(total_payouts),
+        "Net Underwriting Margin": format_currency(net_underwriting_profit),
+        "Loss Ratio": f"{loss_ratio:.1f}%",
+        "Combined Ratio (Est.)": f"{combined_ratio:.1f}%",
+        "Total Claims Filed": format_number(total_claims_count),
+        "Avg Claims SLA": f"{avg_sla_days:.1f} days",
+        "Avg Claim Size": format_currency(avg_claim_size),
+        "Avg Policy Retention": f"{avg_retention:.1f}%",
+        "Total Active Policies": format_number(total_active_policies),
+        "New Policies Acquired": format_number(total_new_policies),
+        "Policies Cancelled": format_number(total_cancelled_policies),
+        "Fraud Losses Prevented": format_currency(fraud_saved),
+    }
+
+    # Display as a clean two-column dataframe table
+    kpi_table = pd.DataFrame(
+        list(kpi_display.items()),
+        columns=["Metric", "Value"]
+    )
+    st.dataframe(kpi_table, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # --- FINANCIAL TRENDS ---
+    st.subheader("Portfolio Performance Analytics")
+    row1_col1, row1_col2 = st.columns(2)
+
+    with row1_col1:
+        st.markdown("#### Monthly Revenue vs. Paid Claims Trajectory")
+        trend_df = session.sql("""
+            SELECT
+                T.MONTH_YEAR,
+                SUM(T.TOTAL_PREMIUM_REVENUE) AS REVENUE,
+                SUM(K.TOTAL_PAYOUT) AS CLAIMS_PAID
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.POLICY_TRENDS T
+            LEFT JOIN INSURANCE_MGMT_SYSTEM.ANALYTICS.CLAIMS_KPI K ON T.MONTH_YEAR = K.MONTH_YEAR
+            GROUP BY T.MONTH_YEAR
+            ORDER BY T.MONTH_YEAR ASC
+        """).to_pandas()
+        if not trend_df.empty:
+            st.line_chart(trend_df, x="MONTH_YEAR", y=["REVENUE", "CLAIMS_PAID"])
+        else:
+            st.info("No monthly trend data available.")
+
+    with row1_col2:
+        st.markdown("#### Revenue Distribution by Policy Type")
+        prod_df = session.sql("""
+            SELECT
+                POLICY_TYPE,
+                SUM(TOTAL_PREMIUM_REVENUE) AS TOTAL_REVENUE,
+                SUM(ACTIVE_POLICIES) AS ACTIVE_POLICIES_COUNT
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.POLICY_TRENDS
+            GROUP BY POLICY_TYPE
+            ORDER BY TOTAL_REVENUE DESC
+        """).to_pandas()
+        if not prod_df.empty:
+            st.bar_chart(prod_df, x="POLICY_TYPE", y="TOTAL_REVENUE")
+        else:
+            st.info("No product mix data available.")
+
+    st.divider()
+
+    # --- LOSS RATIO & GROWTH ---
+    st.subheader("Underwriting Health & Loss Ratio Analysis")
+    row2_col1, row2_col2 = st.columns(2)
+
+    with row2_col1:
+        st.markdown("#### Loss Ratio Trend by Product & Tier")
+        loss_df = session.sql("""
+            SELECT
+                MONTH_YEAR, POLICY_TYPE,
+                AVG(LOSS_RATIO) * 100 AS AVG_LOSS_RATIO_PCT,
+                AVG(COMBINED_RATIO) * 100 AS AVG_COMBINED_RATIO_PCT
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.LOSS_RATIO_HISTORY
+            GROUP BY MONTH_YEAR, POLICY_TYPE
+            ORDER BY MONTH_YEAR ASC
+        """).to_pandas()
+        if not loss_df.empty:
+            st.line_chart(loss_df, x="MONTH_YEAR", y="AVG_LOSS_RATIO_PCT", color="POLICY_TYPE")
+        else:
+            st.info("No historical loss ratio data available.")
+
+    with row2_col2:
+        st.markdown("#### Policy Net Volume Growth (Acquired vs. Cancelled)")
+        growth_df = session.sql("""
+            SELECT
+                MONTH_YEAR,
+                SUM(NEW_POLICIES) AS NEW_POLICIES,
+                SUM(CANCELLED_POLICIES) AS CANCELLED_POLICIES
+            FROM INSURANCE_MGMT_SYSTEM.ANALYTICS.POLICY_TRENDS
+            GROUP BY MONTH_YEAR
+            ORDER BY MONTH_YEAR ASC
+        """).to_pandas()
+        if not growth_df.empty:
+            st.area_chart(growth_df, x="MONTH_YEAR", y=["NEW_POLICIES", "CANCELLED_POLICIES"])
+        else:
+            st.info("No policy growth trends available.")
+
+    st.divider()
+
+    # --- DEMOGRAPHICS ---
+    st.subheader("Policyholder Demographics & Risk Distribution")
+    demo_col1, demo_col2 = st.columns(2)
+
+    with demo_col1:
+        st.markdown("#### Customer Distribution by Age Bracket")
+        age_df = session.sql("""
+            SELECT
+                CASE
+                    WHEN AGE < 25 THEN 'Under 25'
+                    WHEN AGE BETWEEN 25 AND 40 THEN '25-40'
+                    WHEN AGE BETWEEN 41 AND 60 THEN '41-60'
+                    ELSE '60+'
+                END AS AGE_GROUP,
+                COUNT(CUSTOMER_ID) AS CUSTOMER_COUNT,
+                AVG(ANNUAL_INCOME) AS AVG_INCOME
+            FROM INSURANCE_MGMT_SYSTEM.CORE.CUSTOMERS
+            GROUP BY AGE_GROUP
+        """).to_pandas()
+        if not age_df.empty:
+            st.bar_chart(age_df, x="AGE_GROUP", y="CUSTOMER_COUNT")
+        else:
+            st.info("No customer demographic data found.")
+
+    with demo_col2:
+        st.markdown("#### Financial Summary Table")
+        if not prod_df.empty:
+            display_df = prod_df.copy()
+            display_df["Formatted Revenue"] = display_df["TOTAL_REVENUE"].apply(format_currency)
+            st.dataframe(
+                display_df[["POLICY_TYPE", "ACTIVE_POLICIES_COUNT", "Formatted Revenue"]],
+                use_container_width=True
+            )
+
+    st.divider()
+
+    # --- EXPORT DATA ---
+    st.subheader("Export Dashboard Data")
+    st.caption("Download KPI summaries, chart data as CSV, or a full PDF report.")
+
+    kpi_summary = pd.DataFrame([{
+        "Gross Written Premium": total_gwp,
+        "Total Claims Paid": total_payouts,
+        "Net Underwriting Margin": net_underwriting_profit,
+        "Loss Ratio (%)": round(loss_ratio, 2),
+        "Combined Ratio (%)": round(combined_ratio, 2),
+        "Avg Retention (%)": round(avg_retention, 2),
+        "Total Active Policies": int(total_active_policies),
+        "New Policies Acquired": int(total_new_policies),
+        "Policies Cancelled": int(total_cancelled_policies),
+        "Total Claims Filed": int(total_claims_count),
+        "Avg SLA Days": round(avg_sla_days, 2),
+        "Avg Claim Size": round(avg_claim_size, 2),
+        "Fraud Losses Prevented": fraud_saved,
+        "Export Date": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }])
+
+    export_cols = st.columns(5)
+
+    with export_cols[0]:
+        st.download_button(
+            "📄 KPI Summary (CSV)",
+            kpi_summary.to_csv(index=False),
+            file_name="executive_kpi_summary.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+    with export_cols[1]:
+        if 'trend_df' in dir() and not trend_df.empty:
+            st.download_button(
+                "📄 Revenue vs Claims",
+                trend_df.to_csv(index=False),
+                file_name="revenue_vs_claims_trend.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+    with export_cols[2]:
+        if 'loss_df' in dir() and not loss_df.empty:
+            st.download_button(
+                "📄 Loss Ratios",
+                loss_df.to_csv(index=False),
+                file_name="loss_ratio_history.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+    with export_cols[3]:
+        all_sheets = {}
+        all_sheets["KPI Summary"] = kpi_summary
+        if 'trend_df' in dir() and not trend_df.empty:
+            all_sheets["Revenue vs Claims"] = trend_df
+        if 'prod_df' in dir() and not prod_df.empty:
+            all_sheets["Revenue by Product"] = prod_df
+        if 'loss_df' in dir() and not loss_df.empty:
+            all_sheets["Loss Ratio"] = loss_df
+        if 'growth_df' in dir() and not growth_df.empty:
+            all_sheets["Policy Growth"] = growth_df
+        if 'age_df' in dir() and not age_df.empty:
+            all_sheets["Demographics"] = age_df
+        combined = pd.concat(
+            [df.assign(_sheet=name) for name, df in all_sheets.items()],
+            ignore_index=True
+        )
+        st.download_button(
+            "📄 All Data (CSV)",
+            combined.to_csv(index=False),
+            file_name="executive_dashboard_full_export.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+    with export_cols[4]:
+        # PDF Report with all metrics, tables, and data
+        chart_dfs = {}
+        if 'trend_df' in dir() and not trend_df.empty:
+            chart_dfs["Revenue vs Claims Trend"] = trend_df
+        if 'prod_df' in dir() and not prod_df.empty:
+            chart_dfs["Revenue by Policy Type"] = prod_df
+        if 'loss_df' in dir() and not loss_df.empty:
+            chart_dfs["Loss Ratio History"] = loss_df
+        if 'growth_df' in dir() and not growth_df.empty:
+            chart_dfs["Policy Growth (New vs Cancelled)"] = growth_df
+        if 'age_df' in dir() and not age_df.empty:
+            chart_dfs["Customer Demographics"] = age_df
+
+        try:
+            pdf_bytes = generate_pdf_report(kpi_display, chart_dfs)
+            st.download_button(
+                "📥 Full Report (PDF)",
+                pdf_bytes,
+                file_name="executive_dashboard_report.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        except ImportError:
+            st.warning("PDF export requires `reportlab`. Add it to your package requirements.")
+
+    st.divider()
+
+    # --- EXECUTIVE INSIGHTS AGENT ---
+    EXEC_AGENT_PROMPT = (
+        "Be concise. Return only the key results in 2-3 short sentences. "
+        "No explanations, no methodology, no caveats. Just the numbers and findings."
+    )
+    render_agent_chat(
+        agent_key="exec",
+        agent_fqn="INSURANCE_MGMT_SYSTEM.CORE.EXECUTIVE_INSIGHTS_AGENT",
+        agent_label="Executive Insights Agent",
+        sample_questions=[
+            "Revenue by product?",
+            "Loss ratio trend?",
+            "Top retention rates?"
+        ],
+        system_prompt=EXEC_AGENT_PROMPT
+    )
+
+
+# ==============================================================================
+# MODULE 2: INTERACTIVE PREMIUM CALCULATOR & QUOTE GENERATOR
+# ==============================================================================
+elif page == "🧮 Dynamic Premium Calculator":
+    st.title("🧮 Risk-Adjusted Rating & Pricing Engine")
+    st.markdown("Automated underwriting calculator that collects policy-specific inputs, retrieves baseline rating metrics, and applies multi-factor pricing formulas.")
+
+    # --- Tab layout: Calculator | Quote History ---
+    calc_tab, history_tab = st.tabs(["Premium Calculator", "Quote History"])
+
+    with calc_tab:
+        st.subheader("Step 1: Select Insurance Product & Customer Profile")
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            customer_id = st.text_input("Customer ID", value="CUST-1001")
+        with col_s2:
+            policy_type = st.selectbox("Type of Insurance", ["HEALTH", "AUTO", "LIFE", "HOME"])
+        with col_s3:
+            plan_tier = st.selectbox("Plan Tier", ["BRONZE", "SILVER", "GOLD", "PLATINUM"])
+
+        st.divider()
+        st.subheader(f"Step 2: Enter Underwriting Data for {policy_type} Insurance")
+
+        age = 35
+        location_region = "LOW_RISK"
+        prior_claims = 0
+        discounts = 10.0
+        add_factor_1 = 1.0
+        add_factor_2 = 1.0
+        add_factor_1_label = "N/A"
+        add_factor_2_label = "N/A"
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            age = st.number_input("Policyholder Age", min_value=18, max_value=100, value=35)
+            location_region = st.selectbox("Location Risk Zone", ["LOW_RISK", "MEDIUM_RISK", "HIGH_RISK"])
+        with col_b:
+            prior_claims = st.number_input("Prior Claims Count (Past 3 Years)", min_value=0, max_value=10, value=0)
+            discounts = st.number_input("Discounts Applied ($)", min_value=0.0, max_value=200.0, value=15.0)
+
+        st.markdown("##### *Product-Specific Parameters:*")
+        col_p1, col_p2 = st.columns(2)
+
+        smoking_status = "NO"
+        bmi = 24.5
+        annual_mileage = 12000
+        coverage_amount = 250000
+
+        if policy_type == "HEALTH":
+            with col_p1:
+                smoking_status = st.selectbox("Smoking Status", ["NO", "YES"], key="health_smoke")
+                bmi = st.number_input("BMI Index", min_value=15.0, max_value=50.0, value=24.5)
+            with col_p2:
+                has_preexisting = st.selectbox("Pre-Existing Condition?", ["NO", "YES"])
+                add_factor_1_label = "Pre-Existing Condition Risk"
+                add_factor_1 = 1.35 if has_preexisting == "YES" else 1.0
+                network_choice = st.selectbox("Hospital Network", ["STANDARD", "PREMIUM_ALL_ACCESS"])
+                add_factor_2_label = "Network Selection Multiplier"
+                add_factor_2 = 1.20 if network_choice == "PREMIUM_ALL_ACCESS" else 1.0
+
+        elif policy_type == "AUTO":
+            with col_p1:
+                credit_score = st.number_input("Credit Score", min_value=300, max_value=850, value=720)
+                annual_mileage = st.number_input("Annual Mileage Driven", min_value=1000, max_value=50000, value=12000)
+            with col_p2:
+                vehicle_class = st.selectbox("Vehicle Performance Class", ["STANDARD_SEDAN", "SUV", "SPORTS_CAR"])
+                add_factor_1_label = "Vehicle Performance Risk"
+                add_factor_1 = 1.45 if vehicle_class == "SPORTS_CAR" else (1.10 if vehicle_class == "SUV" else 1.0)
+                traffic_violations = st.number_input("Traffic Violations (Past 3 Yrs)", min_value=0, max_value=10, value=0)
+                add_factor_2_label = "Violations Record"
+                add_factor_2 = 1.0 + (traffic_violations * 0.15)
+
+        elif policy_type == "LIFE":
+            with col_p1:
+                smoking_status = st.selectbox("Smoking Status", ["NO", "YES"], key="life_smoke")
+                coverage_amount = st.number_input("Coverage Amount ($)", min_value=50000, max_value=2000000, value=250000, step=50000)
+            with col_p2:
+                hazardous_job = st.selectbox("Hazardous Occupation/Hobby?", ["NO", "YES"])
+                add_factor_1_label = "High Hazard Occupation"
+                add_factor_1 = 1.50 if hazardous_job == "YES" else 1.0
+                family_history = st.selectbox("Family Critical Illness History?", ["NO", "YES"])
+                add_factor_2_label = "Family Medical Risk"
+                add_factor_2 = 1.25 if family_history == "YES" else 1.0
+
+        elif policy_type == "HOME":
+            with col_p1:
+                property_value = st.number_input("Home Replacement Value ($)", min_value=50000, max_value=2000000, value=300000, step=25000)
+                deductible_choice = st.selectbox("Deductible ($)", [500, 1000, 2500, 5000])
+            with col_p2:
+                construction_type = st.selectbox("Construction Material", ["MASONRY_BRICK", "WOOD_FRAME"])
+                add_factor_1_label = "Construction Material Risk"
+                add_factor_1 = 1.20 if construction_type == "WOOD_FRAME" else 1.0
+                fire_distance = st.selectbox("Distance to Nearest Fire Hydrant/Station", ["< 5 miles", "> 5 miles"])
+                add_factor_2_label = "Fire Protection Distance"
+                add_factor_2 = 1.30 if fire_distance == "> 5 miles" else 1.0
+
+        st.divider()
+        st.subheader("Step 3: Execute Premium Calculation Formula")
+
+        if st.button("⚡ Calculate Premium Quote", type="primary"):
+            # Validate Customer ID exists in CUSTOMERS table
+            safe_cid = escape_sql_string(customer_id)
+            cust_check = session.sql(f"""
+                SELECT CUSTOMER_ID FROM INSURANCE_MGMT_SYSTEM.CORE.CUSTOMERS
+                WHERE CUSTOMER_ID = '{safe_cid}' LIMIT 1
+            """).to_pandas()
+            if cust_check.empty:
+                st.error(f"Customer ID `{customer_id}` not found in the CUSTOMERS table. Please enter a valid Customer ID.")
+                st.stop()
+
+            # Fetch base rate from DB
+            try:
+                tier_df = session.sql(f"""
+                    SELECT MONTHLY_PREMIUM AS BASE_RATE
+                    FROM INSURANCE_MGMT_SYSTEM.PREMIUM.PLAN_TIERS
+                    WHERE UPPER(POLICY_TYPE) = '{escape_sql_string(policy_type.upper())}'
+                      AND UPPER(PLAN_NAME) = '{escape_sql_string(plan_tier.upper())}'
+                    LIMIT 1
+                """).to_pandas()
+                if not tier_df.empty:
+                    base_rate = float(tier_df["BASE_RATE"].iloc[0])
+                    st.info(f"Base rate loaded from PLAN_TIERS: **${base_rate:,.2f}** for {policy_type} / {plan_tier}")
+                else:
+                    st.warning("No base rate found in PLAN_TIERS for this product/tier combination. Using estimated defaults.")
+                    fallback_rates = {"HEALTH": 200.0, "AUTO": 110.0, "LIFE": 75.0, "HOME": 130.0}
+                    base_rate = fallback_rates.get(policy_type, 100.0)
+            except Exception as e:
+                st.warning(f"Could not retrieve base rate from database: {e}. Using estimated defaults.")
+                fallback_rates = {"HEALTH": 200.0, "AUTO": 110.0, "LIFE": 75.0, "HOME": 130.0}
+                base_rate = fallback_rates.get(policy_type, 100.0)
+
+            tier_multiplier_map = {"BRONZE": 0.85, "SILVER": 1.00, "GOLD": 1.25, "PLATINUM": 1.50}
+            tier_multiplier = tier_multiplier_map.get(plan_tier, 1.00)
+            age_factor = 1.40 if age < 25 else (1.30 if age > 55 else 1.00)
+            location_factor = 1.40 if location_region == "HIGH_RISK" else (1.15 if location_region == "MEDIUM_RISK" else 1.00)
+
+            if policy_type in ["HEALTH", "LIFE"]:
+                health_factor = 1.35 if (policy_type == "HEALTH" and bmi > 30) else 1.00
+                lifestyle_factor = 1.50 if smoking_status == "YES" else 1.00
+            else:
+                health_factor = 1.00
+                lifestyle_factor = 1.25 if (policy_type == "AUTO" and annual_mileage > 15000) else 1.00
+
+            claims_history_factor = 1.0 + (prior_claims * 0.15)
+
+            gross_calculated = (
+                (base_rate * tier_multiplier)
+                * age_factor * location_factor * health_factor
+                * lifestyle_factor * claims_history_factor
+                * add_factor_1 * add_factor_2
+            )
+            final_premium = max(0.0, round(gross_calculated - discounts, 2))
+
+            st.success(f"**Final Estimated Premium: ${final_premium:,.2f} / month**")
+
+            st.markdown("#### Formula Multiplier Breakdown")
+            breakdown_df = pd.DataFrame({
+                "Formula Parameter": [
+                    "Base Rate", "Tier Multiplier", "Age Factor", "Location Factor",
+                    "Health Factor", "Lifestyle Factor", "Claims History Factor",
+                    f"Factor 1 ({add_factor_1_label})",
+                    f"Factor 2 ({add_factor_2_label})",
+                    "Applied Discounts"
+                ],
+                "Value / Multiplier": [
+                    f"${base_rate:,.2f}", f"{tier_multiplier:.2f}x", f"{age_factor:.2f}x", f"{location_factor:.2f}x",
+                    f"{health_factor:.2f}x", f"{lifestyle_factor:.2f}x", f"{claims_history_factor:.2f}x",
+                    f"{add_factor_1:.2f}x", f"{add_factor_2:.2f}x", f"-${discounts:,.2f}"
+                ]
+            })
+            st.table(breakdown_df)
+
+            # Save to audit log - generate CALC_ID in Python (16 chars, fits VARCHAR(20))
+            calc_id = generate_calc_id()
+            safe_customer_id = escape_sql_string(customer_id)
+            session.sql(f"""
+                INSERT INTO INSURANCE_MGMT_SYSTEM.PREMIUM.PREMIUM_CALCULATIONS (
+                    CALC_ID, CUSTOMER_ID, POLICY_TYPE, PLAN_TIER, CALC_DATE,
+                    BASE_PREMIUM, AGE_FACTOR, LOCATION_FACTOR, HEALTH_FACTOR,
+                    LIFESTYLE_FACTOR, CLAIMS_HISTORY_FACTOR, FINAL_PREMIUM, DISCOUNT_APPLIED
+                )
+                SELECT
+                    '{escape_sql_string(calc_id)}',
+                    '{safe_customer_id}',
+                    '{escape_sql_string(policy_type)}',
+                    '{escape_sql_string(plan_tier)}',
+                    CURRENT_TIMESTAMP(),
+                    {base_rate}, {age_factor}, {location_factor}, {health_factor},
+                    {lifestyle_factor}, {claims_history_factor}, {final_premium}, {discounts}
+            """).collect()
+            st.info(f"Calculation `{calc_id}` logged to `PREMIUM.PREMIUM_CALCULATIONS`.")
+
+    with history_tab:
+        st.subheader("Recent Premium Calculations")
+        st.markdown("View past premium quotes and calculations.")
+
+        history_df = session.sql("""
+            SELECT
+                CALC_ID, CUSTOMER_ID, POLICY_TYPE, PLAN_TIER,
+                CALC_DATE, BASE_PREMIUM, FINAL_PREMIUM, DISCOUNT_APPLIED
+            FROM INSURANCE_MGMT_SYSTEM.PREMIUM.PREMIUM_CALCULATIONS
+            ORDER BY CALC_DATE DESC
+            LIMIT 50
+        """).to_pandas()
+
+        if not history_df.empty:
+            st.dataframe(history_df, use_container_width=True)
+
+            st.markdown("#### Premium Distribution")
+            if len(history_df) > 1:
+                chart_data = history_df.groupby("POLICY_TYPE")["FINAL_PREMIUM"].mean().reset_index()
+                chart_data.columns = ["POLICY_TYPE", "AVG_PREMIUM"]
+                st.bar_chart(chart_data, x="POLICY_TYPE", y="AVG_PREMIUM")
+        else:
+            st.info("No calculation history found. Run a premium calculation first.")
+
+
+# ==============================================================================
+# MODULE 3: CLAIMS PROCESSING & AI TRIAGE
+# ==============================================================================
+elif page == "⚖️ Claims Processing & AI Triage":
+    st.title("⚖️ Claims Operations & Fraud Radar")
+    st.markdown("Review incoming claims, utilize AI-powered triage, and manage claim statuses in real time.")
+
+    # --- Pagination state ---
+    if "claims_page" not in st.session_state:
+        st.session_state["claims_page"] = 0
+    PAGE_SIZE = 20
+
+    # --- Status filter ---
+    status_filter = st.selectbox(
+        "Filter by Status:",
+        ["ALL", "Open", "Under Investigation", "Approved", "Denied", "Escalated"],
+        index=0
+    )
+
+    where_clause = ""
+    if status_filter != "ALL":
+        where_clause = f"WHERE CLAIM_STATUS = '{escape_sql_string(status_filter)}'"
+
+    # --- Fetch claims with pagination ---
+    offset = st.session_state["claims_page"] * PAGE_SIZE
+    claims_data = session.sql(f"""
+        SELECT CLAIM_ID, CUSTOMER_ID, POLICY_ID, CLAIM_TYPE, CLAIM_AMOUNT,
+               CLAIM_STATUS, FRAUD_SCORE, FRAUD_FLAG, PRIORITY, ESCALATED
+        FROM INSURANCE_MGMT_SYSTEM.CORE.CLAIMS
+        {where_clause}
+        ORDER BY CLAIM_DATE DESC
+        LIMIT {PAGE_SIZE} OFFSET {offset}
+    """).to_pandas()
+
+    total_count_df = session.sql(f"""
+        SELECT COUNT(*) AS CNT FROM INSURANCE_MGMT_SYSTEM.CORE.CLAIMS {where_clause}
+    """).to_pandas()
+    total_count = int(total_count_df["CNT"].iloc[0])
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    if claims_data.empty:
+        st.info("No claims found matching the current filter.")
+    else:
+        st.subheader(f"Claims Queue ({total_count} total)")
+        st.dataframe(claims_data, use_container_width=True)
+
+        # Pagination controls
+        pg_col1, pg_col2, pg_col3 = st.columns([1, 2, 1])
+        with pg_col1:
+            if st.button("← Previous", disabled=st.session_state["claims_page"] == 0):
+                st.session_state["claims_page"] -= 1
+                st.rerun()
+        with pg_col2:
+            st.caption(f"Page {st.session_state['claims_page'] + 1} of {total_pages}")
+        with pg_col3:
+            if st.button("Next →", disabled=st.session_state["claims_page"] >= total_pages - 1):
+                st.session_state["claims_page"] += 1
+                st.rerun()
+
+        st.divider()
+        st.subheader("Inspect & Action Individual Claim")
+
+        selected_claim_id = st.selectbox("Select Claim ID to Process:", claims_data["CLAIM_ID"].unique())
+
+        if selected_claim_id:
+            claim_detail = claims_data[claims_data["CLAIM_ID"] == selected_claim_id].iloc[0]
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Claim Amount", f"${claim_detail['CLAIM_AMOUNT']:,.2f}")
+            c2.metric("Fraud Risk Score", f"{claim_detail['FRAUD_SCORE']:.2f}")
+            c3.metric("Current Status", claim_detail['CLAIM_STATUS'])
+            c4.metric("Priority", claim_detail['PRIORITY'])
+
+            # Action Buttons with confirmation dialogs
+            safe_claim_id = sanitize_id(selected_claim_id)
+            current_user = session.sql("SELECT CURRENT_USER()").collect()[0][0]
+
+            @st.dialog(f"Confirm: Approve Claim {safe_claim_id}")
+            def confirm_approve(claim_id, user):
+                st.markdown(f"Are you sure you want to **approve** claim **{claim_id}**?")
+                st.caption(f"This action will be recorded under user: {user}")
+                col_yes, col_no = st.columns(2)
+                with col_yes:
+                    if st.button("Yes, Approve", type="primary", key="confirm_approve_yes"):
+                        session.sql(f"""
+                            UPDATE INSURANCE_MGMT_SYSTEM.CORE.CLAIMS
+                            SET CLAIM_STATUS = 'Approved',
+                                UPDATED_BY = '{escape_sql_string(user)}',
+                                UPDATED_AT = CURRENT_TIMESTAMP()
+                            WHERE CLAIM_ID = '{sanitize_id(claim_id)}'
+                        """).collect()
+                        st.success(f"Claim {claim_id} Approved!")
+                        st.rerun()
+                with col_no:
+                    if st.button("Cancel", key="confirm_approve_no"):
+                        st.rerun()
+
+            @st.dialog(f"Confirm: Deny Claim {safe_claim_id}")
+            def confirm_deny(claim_id, user):
+                st.markdown(f"Are you sure you want to **deny** claim **{claim_id}**?")
+                deny_reason = st.text_input("Reason for denial (optional):", key="deny_reason_input")
+                st.caption(f"This action will be recorded under user: {user}")
+                col_yes, col_no = st.columns(2)
+                with col_yes:
+                    if st.button("Yes, Deny", type="primary", key="confirm_deny_yes"):
+                        session.sql(f"""
+                            UPDATE INSURANCE_MGMT_SYSTEM.CORE.CLAIMS
+                            SET CLAIM_STATUS = 'Denied',
+                                UPDATED_BY = '{escape_sql_string(user)}',
+                                UPDATED_AT = CURRENT_TIMESTAMP()
+                            WHERE CLAIM_ID = '{sanitize_id(claim_id)}'
+                        """).collect()
+                        st.error(f"Claim {claim_id} Denied.")
+                        st.rerun()
+                with col_no:
+                    if st.button("Cancel", key="confirm_deny_no"):
+                        st.rerun()
+
+            @st.dialog(f"Confirm: Escalate Claim {safe_claim_id}")
+            def confirm_escalate(claim_id, user):
+                st.markdown(f"Are you sure you want to **escalate** claim **{claim_id}** to the Fraud Unit?")
+                st.warning("This will flag the claim for fraud investigation.")
+                st.caption(f"This action will be recorded under user: {user}")
+                col_yes, col_no = st.columns(2)
+                with col_yes:
+                    if st.button("Yes, Escalate", type="primary", key="confirm_escalate_yes"):
+                        session.sql(f"""
+                            UPDATE INSURANCE_MGMT_SYSTEM.CORE.CLAIMS
+                            SET ESCALATED = TRUE, CLAIM_STATUS = 'Escalated',
+                                UPDATED_BY = '{escape_sql_string(user)}',
+                                UPDATED_AT = CURRENT_TIMESTAMP()
+                            WHERE CLAIM_ID = '{sanitize_id(claim_id)}'
+                        """).collect()
+                        st.warning(f"Claim {claim_id} Escalated to Fraud Unit!")
+                        st.rerun()
+                with col_no:
+                    if st.button("Cancel", key="confirm_escalate_no"):
+                        st.rerun()
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                if st.button("✅ Approve Claim"):
+                    confirm_approve(safe_claim_id, current_user)
+            with col_b:
+                if st.button("❌ Deny Claim"):
+                    confirm_deny(safe_claim_id, current_user)
+            with col_c:
+                if st.button("🚩 Flag for Escalation"):
+                    confirm_escalate(safe_claim_id, current_user)
+
+    st.divider()
+
+    # --- CLAIMS TRIAGE AGENT ---
+    render_agent_chat(
+        agent_key="claims",
+        agent_fqn="INSURANCE_MGMT_SYSTEM.CORE.CLAIMS_TRIAGE_AGENT",
+        agent_label="Claims Triage Agent",
+        sample_questions=[
+            "High fraud score claims?",
+            "Staged accident patterns?",
+            "Pending claims over $10K?"
+        ]
+    )
+
+
+# ==============================================================================
+# MODULE 4: RISK & CHURN PREDICTION WORKBENCH
+# ==============================================================================
+elif page == "🛡️ Churn & Risk Prediction Engine":
+    st.title("🛡️ Proactive Policy Retention & Churn Prediction")
+    st.markdown("Identify high-churn-risk policies, analyze risk drivers, and execute retention strategies powered by AI.")
+
+    # --- Churn Summary KPIs ---
+    churn_summary = session.sql("""
+        SELECT
+            COUNT(*) AS TOTAL_AT_RISK,
+            SUM(REVENUE_AT_RISK) AS TOTAL_REVENUE_AT_RISK,
+            AVG(CHURN_PROBABILITY) AS AVG_CHURN_PROB,
+            SUM(CASE WHEN PRIORITY = 'Critical' THEN 1 ELSE 0 END) AS CRITICAL_COUNT
+        FROM INSURANCE_MGMT_SYSTEM.RISK.AT_RISK_POLICIES
+    """).to_pandas()
+
+    if not churn_summary.empty and churn_summary.iloc[0]["TOTAL_AT_RISK"] > 0:
+        row = churn_summary.iloc[0]
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("At-Risk Policies", f"{int(row['TOTAL_AT_RISK'])}")
+        k2.metric("Revenue at Risk", format_currency(row['TOTAL_REVENUE_AT_RISK']))
+        k3.metric("Avg Churn Probability", f"{row['AVG_CHURN_PROB'] * 100:.1f}%")
+        k4.metric("Critical Priority", f"{int(row['CRITICAL_COUNT'])}")
+    else:
+        st.info("No at-risk policies detected.")
+
+    st.divider()
+
+    # --- Risk Distribution Charts ---
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        st.markdown("#### Churn Risk by Policy Type")
+        risk_by_type = session.sql("""
+            SELECT POLICY_TYPE, RISK_CATEGORY, COUNT(*) AS POLICY_COUNT
+            FROM INSURANCE_MGMT_SYSTEM.RISK.AT_RISK_POLICIES
+            GROUP BY POLICY_TYPE, RISK_CATEGORY
+            ORDER BY POLICY_COUNT DESC
+        """).to_pandas()
+        if not risk_by_type.empty:
+            st.bar_chart(risk_by_type, x="POLICY_TYPE", y="POLICY_COUNT", color="RISK_CATEGORY")
+        else:
+            st.info("No risk distribution data.")
+
+    with chart_col2:
+        st.markdown("#### Top Risk Factors Driving Churn")
+        risk_factors = session.sql("""
+            SELECT TOP_RISK_FACTOR, COUNT(*) AS FREQUENCY, AVG(CHURN_PROBABILITY) AS AVG_PROB
+            FROM INSURANCE_MGMT_SYSTEM.RISK.CHURN_PREDICTIONS
+            GROUP BY TOP_RISK_FACTOR
+            ORDER BY FREQUENCY DESC
+            LIMIT 10
+        """).to_pandas()
+        if not risk_factors.empty:
+            st.bar_chart(risk_factors, x="TOP_RISK_FACTOR", y="FREQUENCY")
+        else:
+            st.info("No risk factor data.")
+
+    st.divider()
+
+    # --- Top At-Risk Policies Table ---
+    st.subheader("Top At-Risk Policies")
+    at_risk_df = session.sql("""
+        SELECT
+            a.POLICY_ID, a.CUSTOMER_ID, a.POLICY_TYPE, a.RISK_CATEGORY,
+            a.CHURN_PROBABILITY, a.REVENUE_AT_RISK, a.RECOMMENDED_ACTION,
+            a.DAYS_SINCE_CONTACT, a.MISSED_PAYMENTS, a.PRIORITY
+        FROM INSURANCE_MGMT_SYSTEM.RISK.AT_RISK_POLICIES a
+        ORDER BY a.CHURN_PROBABILITY DESC
+        LIMIT 20
+    """).to_pandas()
+
+    if not at_risk_df.empty:
+        st.dataframe(at_risk_df, use_container_width=True)
+    else:
+        st.info("No high-risk churn policies detected.")
+
+    st.divider()
+
+    # --- Retention Outcomes ---
+    st.subheader("Retention Offer Outcomes")
+    outcomes_df = session.sql("""
+        SELECT
+            RETENTION_OFFER,
+            OUTCOME,
+            COUNT(*) AS COUNT,
+            AVG(CHURN_PROBABILITY) AS AVG_CHURN_PROB
+        FROM INSURANCE_MGMT_SYSTEM.RISK.CHURN_PREDICTIONS
+        WHERE OUTCOME IS NOT NULL
+        GROUP BY RETENTION_OFFER, OUTCOME
+        ORDER BY COUNT DESC
+    """).to_pandas()
+
+    if not outcomes_df.empty:
+        st.dataframe(outcomes_df, use_container_width=True)
+    else:
+        st.info("No retention outcome data yet.")
+
+    st.divider()
+
+    # --- RETENTION AGENT ---
+    render_agent_chat(
+        agent_key="retention",
+        agent_fqn="INSURANCE_MGMT_SYSTEM.RISK.RETENTION_AGENT",
+        agent_label="Retention Agent",
+        sample_questions=[
+            "Highest churn risk?",
+            "Top risk factors?",
+            "Best retention offers?"
+        ]
+    )
